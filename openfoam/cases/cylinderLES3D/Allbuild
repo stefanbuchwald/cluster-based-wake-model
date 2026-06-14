@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# ---- sanity checks ----
+need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Fehler: '$1' nicht gefunden. (OpenFOAM laden? gmsh installiert?)"; exit 1; }; }
+need_cmd gmsh
+need_cmd gmshToFoam
+need_cmd checkMesh
+need_cmd python3
+
+GEO="karman_cylinder_3D_structured.geo"
+MSH="karman_cylinder_3D_structured.msh"
+MSH_FIXED="karman_cylinder_3D_structured_fixed.msh"
+
+echo "==> clean polyMesh + logs"
+rm -rf constant/polyMesh
+rm -f log.* || true
+
+echo "==> gmsh 3D mesh (${GEO})"
+gmsh "${GEO}" -3 -format msh2 -o "${MSH}" | tee log.gmsh
+
+echo "==> renumber Physical IDs -> ${MSH_FIXED}"
+python3 - "${MSH}" "${MSH_FIXED}" <<'PY'
+import sys, re
+
+inp, outp = sys.argv[1], sys.argv[2]
+
+# desired mapping by (dim, name)
+target = {
+    (2, "front"): 1,
+    (2, "back"): 2,
+    (2, "inlet"): 3,
+    (2, "outlet"): 4,
+    (2, "walls"): 5,
+    (2, "cylinder"): 6,
+    (3, "fluid"): 10,  # keep volume tag away from surface tags
+}
+
+# element type -> dimension (msh2)
+dim_by_type = {
+    # 1D
+    1: 1, 8: 1, 26: 1, 27: 1, 28: 1,
+    # 2D
+    2: 2, 3: 2, 9: 2, 10: 2, 16: 2, 20: 2, 21: 2,
+    # 3D
+    4: 3, 5: 3, 6: 3, 7: 3, 11: 3, 12: 3, 13: 3, 14: 3, 17: 3, 18: 3, 19: 3,
+}
+
+lines = open(inp, "r", encoding="utf-8", errors="ignore").read().splitlines(True)
+
+# parse physical names and build dim-aware old->new mapping
+phys_section = None
+for i, ln in enumerate(lines):
+    if ln.strip() == "$PhysicalNames":
+        phys_section = i
+        break
+
+mapping = {}  # (dim, oldTag) -> newTag
+
+if phys_section is not None:
+    n = int(lines[phys_section + 1].strip())
+    start = phys_section + 2
+    end = start + n
+
+    for j in range(start, end):
+        m = re.match(r"\s*(\d+)\s+(\d+)\s+\"([^\"]+)\"\s*$", lines[j].strip())
+        if not m:
+            continue
+        dim = int(m.group(1))
+        old = int(m.group(2))
+        name = m.group(3)
+        new = target.get((dim, name), old)
+        mapping[(dim, old)] = new
+
+        # rewrite the physical names line if we changed it
+        if new != old:
+            lines[j] = re.sub(rf"^\s*{dim}\s+{old}\s+", f"{dim} {new} ", lines[j])
+
+# rewrite elements physical tags, dimension-aware
+def elem_dim(etype: int) -> int:
+    return dim_by_type.get(etype, 0)
+
+# find elements section
+elem_start = None
+for i, ln in enumerate(lines):
+    if ln.strip() == "$Elements":
+        elem_start = i
+        break
+
+if elem_start is not None:
+    n_elem = int(lines[elem_start + 1].strip())
+    start = elem_start + 2
+    end = start + n_elem
+
+    for i in range(start, end):
+        parts = lines[i].strip().split()
+        if len(parts) < 4:
+            continue
+        etype = int(parts[1])
+        ntags = int(parts[2])
+        if ntags < 1:
+            continue
+        phys = int(parts[3])
+        d = elem_dim(etype)
+        new_phys = mapping.get((d, phys))
+        if new_phys is not None and new_phys != phys:
+            parts[3] = str(new_phys)
+            lines[i] = " ".join(parts) + "\n"
+
+open(outp, "w", encoding="utf-8").writelines(lines)
+print("  wrote", outp)
+PY
+
+echo "==> gmshToFoam"
+gmshToFoam "${MSH_FIXED}" | tee log.gmshToFoam
+
+echo "==> detect Lz (from checkMesh bounding box)"
+bbox_line=$(checkMesh -allGeometry -allTopology 2>&1 | tee log.checkMesh_pre | grep "Overall domain bounding box" | tail -1 || true)
+
+if [ -z "${bbox_line}" ]; then
+  echo "Fehler: konnte bounding box nicht aus checkMesh lesen."
+  exit 1
+fi
+
+# bbox_line example: Overall domain bounding box (-10 -5 0) (25 5 3)
+LZ=$(echo "${bbox_line}" | awk '
+  {
+    gsub(/[()]/,"");
+    for(i=1;i<=NF;i++) if($i ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) a[++n]=$i;
+  }
+  END { if(n>=6) printf "%.15g\n", (a[6]-a[3]); else print "" }
+')
+
+if [ -z "${LZ}" ]; then
+  echo "Fehler: konnte Lz nicht berechnen."
+  exit 1
+fi
+
+echo "    Lz = ${LZ}"
+
+echo "==> patch constant/polyMesh/boundary: front/back -> cyclic (front:-Lz, back:+Lz)"
+python3 - "${LZ}" <<'PY'
+import sys, re
+from pathlib import Path
+
+Lz = float(sys.argv[1])
+p = Path("constant/polyMesh/boundary")
+s = p.read_text()
+
+def patch_block(text: str, name: str, neighbour: str, sep: float) -> str:
+    # find block
+    pat = rf"(\n\s*{re.escape(name)}\s*\n\s*\{{)(.*?)(\n\s*\}})"
+    m = re.search(pat, text, flags=re.S)
+    if not m:
+        raise SystemExit(f"Patch '{name}' not found in boundary file")
+
+    body = m.group(2)
+
+    # keep nFaces/startFace from existing body
+    nFaces = re.search(r"nFaces\s+(\d+)\s*;", body)
+    startFace = re.search(r"startFace\s+(\d+)\s*;", body)
+    if not nFaces or not startFace:
+        raise SystemExit(f"Could not read nFaces/startFace for patch '{name}'")
+
+    nf = nFaces.group(1)
+    sf = startFace.group(1)
+
+    indent = re.search(r"\n(\s*)type\s+", body)
+    ind = indent.group(1) if indent else "        "
+
+    new_body = (
+        f"\n{ind}type            cyclic;"
+        f"\n{ind}physicalType    cyclic;"
+        f"\n{ind}neighbourPatch  {neighbour};"
+        f"\n{ind}transform       translational;"
+        f"\n{ind}separationVector (0 0 {sep:.15g});"
+        f"\n{ind}matchTolerance  0.001;"
+        f"\n{ind}nFaces          {nf};"
+        f"\n{ind}startFace       {sf};"
+    )
+
+    return text[:m.start(2)] + new_body + text[m.end(2):]
+
+s = patch_block(s, "front", "back", -Lz)
+s = patch_block(s, "back", "front",  Lz)
+p.write_text(s)
+print("patched constant/polyMesh/boundary: front/back -> cyclic")
+PY
+
+echo "==> patch 0/*: front/back -> cyclic"
+python3 - <<'PY'
+import re
+from pathlib import Path
+
+changed = 0
+for f in Path("0").glob("*"):
+    if not f.is_file():
+        continue
+    txt = f.read_text()
+    out = []
+    mod = False
+    for line in txt.splitlines():
+        if re.match(r"^\s*front\s*\{", line):
+            line2 = re.sub(r"type\s+[^;]+;", "type cyclic;", line)
+            mod = mod or (line2 != line)
+            line = line2
+        if re.match(r"^\s*back\s*\{", line):
+            line2 = re.sub(r"type\s+[^;]+;", "type cyclic;", line)
+            mod = mod or (line2 != line)
+            line = line2
+        out.append(line)
+    if mod:
+        f.write_text("\n".join(out) + "\n")
+        changed += 1
+
+print(f"Patched front/back to cyclic in {changed} file(s) under 0/")
+PY
+
+echo "==> checkMesh"
+checkMesh -allTopology -allGeometry | tee log.checkMesh
+
+echo "==> done (mesh built + periodic front/back)"

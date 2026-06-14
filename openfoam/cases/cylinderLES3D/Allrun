@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -eo pipefail
+cd "$(dirname "$0")"
+NP=${1:-1}
+
+if ! command -v foamRun >/dev/null 2>&1; then
+  echo "Fehler: OpenFOAM ist nicht geladen."
+  echo "Bitte vorher ausführen: source /opt/openfoam13/etc/bashrc"
+  exit 1
+fi
+
+echo "==> build mesh + periodic patches"
+./Allbuild
+
+if [ "$NP" -le 1 ]; then
+  echo "==> foamRun (serial)"
+  foamRun | tee log.foamRun
+else
+  echo "==> decomposePar ($NP)"
+  sed -i -E "s/^[[:space:]]*numberOfSubdomains[[:space:]]+[0-9]+;/numberOfSubdomains ${NP};/" system/decomposeParDict
+  decomposePar -force | tee log.decomposePar
+  echo "==> foamRun (parallel $NP)"
+  mpirun -np "$NP" foamRun -parallel | tee log.foamRun
+  echo "==> reconstructPar -latestTime"
+  reconstructPar -latestTime | tee log.reconstructPar || true
+fi
+
+echo "==> done"

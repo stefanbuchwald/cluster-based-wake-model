@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -eo pipefail
+cd "$(dirname "$0")"
+if ! command -v paraFoam >/dev/null 2>&1; then
+  echo "Fehler: OpenFOAM ist nicht geladen (source /opt/openfoam13/etc/bashrc)"
+  exit 1
+fi
+MODE=${1:-auto}
+if [ -d processor0 ]; then
+  if [ "$MODE" = "all" ]; then
+    echo "==> reconstructPar (alle Zeiten)"
+    reconstructPar | tee log.reconstructPar
+  else
+    echo "==> reconstructPar -latestTime"
+    reconstructPar -latestTime | tee log.reconstructPar.latest
+  fi
+fi
+touch "$(basename "$PWD").foam"
+echo "==> Starte paraFoam"
+paraFoam

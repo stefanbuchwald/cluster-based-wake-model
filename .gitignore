@@ -1,0 +1,79 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter and editor state
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.agents/
+.codex/
+*~
+*.swp
+
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Generated project data
+data/*
+!data/README.md
+
+# Distribution archives and generated tree listings
+dist/
+*.zip
+PROJECT_TREE.txt
+PROJECT_TREE_PACKAGE.txt
+
+# Generic numerical and visualization outputs
+*.npy
+*.npz
+*.vtk
+*.vtu
+*.pvtu
+*.pvd
+*.foam
+*.msh
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.avi
+*.mp4
+*.pvsm
+
+# Logs and temporary output
+log
+log.*
+logs/
+TEMP/
+tmp/
+*.log
+
+# OpenFOAM generated mesh and decomposed runs
+openfoam/cases/**/constant/polyMesh/
+openfoam/cases/**/processor*/
+openfoam/cases/**/postProcessing/
+openfoam/cases/**/VTK/
+
+# OpenFOAM generated time directories. Keep only the initial 0/ configuration.
+openfoam/cases/**/0.*/
+openfoam/cases/**/[1-9]*/
+
+# Fields generated in the initial directory by post-processing
+openfoam/cases/**/0/Lambda2
+openfoam/cases/**/0/Q
+openfoam/cases/**/0/vorticity
+
+# Common OpenFOAM/ParaView generated directories
+openfoam/cases/**/lambda2_series/
+openfoam/cases/**/frames*/

@@ -1,0 +1,53 @@
+FoamFile
+{
+    version 2.0;
+    format  ascii;
+    class   dictionary;
+    object  createPatchDict;
+}
+
+// NOTE:
+// This file is auto-generated/overwritten by ./Allbuild based on the mesh z-extent (Lz).
+// You normally don't edit it manually.
+
+pointSync false;
+
+patches
+(
+    {
+        name front;
+        patchInfo
+        {
+            type cyclic;
+            neighbourPatch back;
+            transform translational;
+            separationVector (0 0 1); // placeholder
+        }
+        constructFrom patches;
+        patches (front);
+    }
+    {
+        name back;
+        patchInfo
+        {
+            type cyclic;
+            neighbourPatch front;
+            transform translational;
+            separationVector (0 0 -1); // placeholder
+        }
+        constructFrom patches;
+        patches (back);
+    }
+    {
+        name walls;
+        patchInfo { type wall; }
+        constructFrom patches;
+        patches (walls);
+    }
+    {
+        name cylinder;
+        patchInfo { type wall; }
+        constructFrom patches;
+        patches (cylinder);
+    }
+);

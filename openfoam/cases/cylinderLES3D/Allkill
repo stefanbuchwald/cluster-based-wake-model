@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+casePath="$(pwd)"
+echo "==> Suche laufende OpenFOAM-Prozesse für ${casePath}"
+
+# Find PIDs whose command line contains the case path
+pids=$(ps -eo pid=,args= | grep -F "${casePath}" | grep -E "foamRun|pimpleFoam|pisoFoam|simpleFoam|rhoPimpleFoam|mpirun" | grep -v grep | awk '{print $1}' || true)
+
+if [ -z "${pids}" ]; then
+  echo "==> nichts gefunden"
+  exit 0
+fi
+
+echo "==> kill: ${pids}"
+kill ${pids} || true
+sleep 1
+kill -9 ${pids} 2>/dev/null || true
+echo "==> done"

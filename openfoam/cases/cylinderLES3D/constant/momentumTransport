@@ -1,0 +1,19 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      momentumTransport;
+}
+
+simulationType  LES;
+
+LES
+{
+    model           WALE;
+    delta           cubeRootVol;
+
+    WALECoeffs
+    {
+        Cw          0.325;
+    }
+}
