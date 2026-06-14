@@ -325,15 +325,40 @@ Each run writes a local result directory containing:
 
 These files are reproducible outputs and are ignored by Git.
 
-## Interpretation limits
+## Limitations and scope
 
-- The scripts currently train and reconstruct on the same time series. The
-  plots are descriptive and are not an out-of-sample validation.
-- Results depend on the chosen time window, stride, number of modes, and $K$.
-- A hard POD mode cap can retain much less energy than the requested threshold.
-- Euclidean k-means assumes that the selected coordinates and their scaling
-  define a physically meaningful distance.
-- The deterministic `argmax(Q)` trajectory suppresses less likely transitions.
+This repository is an exploratory ROM workflow, not yet a predictive model
+with quantified uncertainty.
+
+- **No out-of-sample validation.** Clusters, transition statistics, and the
+  displayed reconstruction are currently obtained from the same time series.
+  The plots show how the fitted network represents its training data; they do
+  not establish predictive performance on an unseen interval or another CFD
+  run.
+- **Dependence on temporal sampling.** The time window and `--stride` determine
+  which transitions are observed. Coarse sampling can skip short residence
+  events, while a window containing startup transients can produce a different
+  network from a statistically developed wake.
+- **Finite transition statistics.** Entries of `Q` and `T` are empirical
+  estimates. Rare transitions may be based on very few observations, and a
+  cluster with no observed departure becomes an absorbing state in the
+  deterministic reconstruction. The current output does not report transition
+  counts or confidence intervals.
+- **State representation matters.** A model built from $C_D$, $C_L$, and $C_M$
+  describes force dynamics, but distinct flow fields can share similar force
+  coefficients. Field-based POD contains more spatial information, while its
+  result depends on the retained modes and on any scaling between velocity and
+  pressure.
+- **Deterministic centroid dynamics.** The reconstruction always follows
+  `argmax(Q)` and interpolates linearly between cluster centroids. It therefore
+  suppresses less likely branches and does not reproduce within-cluster
+  fluctuations, turbulent variability, or uncertainty.
+
+Accordingly, the current results should be interpreted as a compact,
+data-driven description of recurrent wake states and their observed
+transitions. A predictive assessment would require separate training and test
+windows, transition-count diagnostics, and comparison against withheld CFD
+data.
 
 ## Keeping Git small
 
