@@ -74,21 +74,21 @@ scikit-learn. Reading OpenFOAM VTK fields additionally needs PyVista and VTK.
 `run_cnm_analysis.py --input-type force` reads an OpenFOAM
 `forceCoeffs.dat` or `coefficient.dat` file. By default, the state vector is
 
-$$
+```math
 \boldsymbol{x}(t_i)
 =
 \begin{bmatrix}
 C_D(t_i) & C_L(t_i) & C_M(t_i)
 \end{bmatrix}.
-$$
+```
 
 Because these observables have different scales, every column is standardized:
 
-$$
+```math
 \widetilde{x}_{ij}
 =
 \frac{x_{ij}-\mu_j}{s_j},
-$$
+```
 
 where $\mu_j$ and $s_j$ are the sample mean and standard deviation of feature
 $j$.
@@ -99,13 +99,13 @@ $j$.
 Velocity components and optional pressure values are flattened into one
 snapshot vector:
 
-$$
+```math
 \boldsymbol{x}_i
 =
 \begin{bmatrix}
 U_x & U_y & U_z & p
 \end{bmatrix}_{t_i}^{\mathsf T}.
-$$
+```
 
 The pressure block can be multiplied by `--p-scale`. This matters because a
 combined velocity-pressure norm otherwise mixes quantities with different
@@ -119,7 +119,7 @@ It is intentionally ignored by Git because it can be several gigabytes large.
 Let $N$ be the number of snapshots and $M$ the number of input features. The
 data matrix uses one snapshot per row:
 
-$$
+```math
 \mathbf{X}
 =
 \begin{bmatrix}
@@ -128,13 +128,13 @@ $$
 \boldsymbol{x}_N^{\mathsf T}
 \end{bmatrix}
 \in \mathbb{R}^{N\times M}.
-$$
+```
 
 ### 1. Mean subtraction and POD
 
 First, the temporal mean is removed:
 
-$$
+```math
 \overline{\boldsymbol{x}}
 =
 \frac{1}{N}\sum_{i=1}^{N}\boldsymbol{x}_i,
@@ -143,60 +143,60 @@ $$
 =
 \boldsymbol{x}_i^{\mathsf T}
 -\overline{\boldsymbol{x}}^{\mathsf T}.
-$$
+```
 
 For a small feature matrix, `run_cnm_analysis.py` computes the singular value
 decomposition directly:
 
-$$
+```math
 \mathbf{X}'
 =
 \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^{\mathsf T}.
-$$
+```
 
 The columns of $\mathbf{V}$ are spatial or feature-space POD modes. The
 temporal POD coefficients used for clustering are
 
-$$
+```math
 \mathbf{A}
 =
 \mathbf{U}_r\boldsymbol{\Sigma}_r
 \in \mathbb{R}^{N\times r}.
-$$
+```
 
 For large VTK fields, `field_pod_from_vtk.py` uses the method of snapshots. It
 forms the much smaller temporal covariance matrix
 
-$$
+```math
 \mathbf{C}
 =
 \frac{1}{N-1}\mathbf{X}'\mathbf{X}'^{\mathsf T}
 \in \mathbb{R}^{N\times N}
-$$
+```
 
 and solves
 
-$$
+```math
 \mathbf{C}\boldsymbol{\psi}_k
 =
 \lambda_k\boldsymbol{\psi}_k.
-$$
+```
 
 The corresponding singular values and temporal coefficients are
 
-$$
+```math
 \sigma_k=\sqrt{(N-1)\lambda_k},
 \qquad
 a_k(t_i)=\sigma_k\psi_{ik}.
-$$
+```
 
 The modal energy fractions are
 
-$$
+```math
 e_k=\frac{\sigma_k^2}{\sum_\ell \sigma_\ell^2},
 \qquad
 E_r=\sum_{k=1}^{r}e_k.
-$$
+```
 
 The smallest $r$ satisfying the requested energy threshold is selected, unless
 `--n-modes-max` imposes a lower hard limit. Therefore, requesting
@@ -215,7 +215,7 @@ limit would perform a second truncation.
 Each row $\boldsymbol{a}_i$ of $\mathbf{A}$ is assigned to one of $K$ clusters.
 The centroids $\boldsymbol{c}_k$ minimize the within-cluster variance
 
-$$
+```math
 J
 =
 \sum_{k=0}^{K-1}
@@ -223,7 +223,7 @@ J
 \left\|
 \boldsymbol{a}_i-\boldsymbol{c}_k
 \right\|_2^2.
-$$
+```
 
 The implementation uses k-means++ initialization, 50 restarts, and a fixed
 random seed. After fitting, cluster numbers are reordered for readability:
@@ -232,29 +232,29 @@ frequent outgoing transition. This changes labels, not the clustering.
 
 The empirical occupation probability is
 
-$$
+```math
 p_k
 =
 \frac{1}{N}\sum_{i=1}^{N}\mathbb{1}(l_i=k).
-$$
+```
 
 ### 3. CMM transition matrix
 
 For every pair of consecutive samples, define
 
-$$
+```math
 n_{jk}
 =
 \#\left\{i:l_i=k,\ l_{i+1}=j\right\}.
-$$
+```
 
 The cluster-based Markov model (CMM) matrix is column-stochastic:
 
-$$
+```math
 P_{jk}
 =
 \frac{n_{jk}}{\sum_m n_{mk}}.
-$$
+```
 
 Thus, column $k$ contains the probability of the next sampled state, given
 that the current sampled state is $C_k$. Its diagonal contains persistence
@@ -271,13 +271,13 @@ For the cluster-based network model, repeated labels are compressed into runs:
 Let $\widehat n_{jk}$ count transitions between consecutive runs. Self
 transitions no longer occur. The direct-transition matrix is
 
-$$
+```math
 Q_{jk}
 =
 \frac{\widehat n_{jk}}
 {\sum_{m\ne k}\widehat n_{mk}},
 \qquad Q_{kk}=0.
-$$
+```
 
 Columns with no observed departure remain zero.
 
@@ -285,38 +285,38 @@ Columns with no observed departure remain zero.
 
 Let run $r$ start at sample $s_r$ and end at sample $e_r$. With
 
-$$
+```math
 \Delta t_{\mathrm{med}}
 =
 \operatorname{median}(t_{i+1}-t_i),
-$$
+```
 
 the implemented residence duration is
 
-$$
+```math
 R_r
 =
 t_{e_r}-t_{s_r}+\Delta t_{\mathrm{med}}.
-$$
+```
 
 For an observed run transition $k\rightarrow j$, the individual transition
 time is
 
-$$
+```math
 \tau_r
 =
 \frac{R_r+R_{r+1}}{2}.
-$$
+```
 
 The matrix entry is the conditional average over all observed
 $k\rightarrow j$ transitions:
 
-$$
+```math
 T_{jk}
 =
 \frac{1}{\widehat n_{jk}}
 \sum_{r:\,k\rightarrow j}\tau_r.
-$$
+```
 
 Unobserved transitions are stored as `NaN`.
 
@@ -325,23 +325,23 @@ Unobserved transitions are stored as `NaN`.
 Starting from cluster $k$, the current implementation chooses the most likely
 direct successor:
 
-$$
+```math
 j^\star
 =
 \operatorname*{arg\,max}_{j}Q_{jk}.
-$$
+```
 
 During the interval
 
-$$
+```math
 t_{\mathrm{arrive}}-t_{\mathrm{depart}}
 =
 T_{j^\star k},
-$$
+```
 
 the state is linearly interpolated between centroids:
 
-$$
+```math
 \widehat{\boldsymbol{a}}(t)
 =
 (1-\alpha)\boldsymbol{c}_k
@@ -350,7 +350,7 @@ $$
 \alpha
 =
 \frac{t-t_{\mathrm{depart}}}{T_{j^\star k}}.
-$$
+```
 
 The displayed cluster label switches from $k$ to $j^\star$ at
 $\alpha=0.5$. If a cluster has no observed successor, the predicted state
@@ -365,14 +365,14 @@ estimates.
 Multidimensional scaling embeds snapshots and centroids into a three-dimensional
 plot by approximately preserving pairwise Euclidean distances:
 
-$$
+```math
 \min_{\boldsymbol{y}_i}
 \sum_{i<j}
 \left(
 \|\boldsymbol{y}_i-\boldsymbol{y}_j\|_2
 -d_{ij}
 \right)^2.
-$$
+```
 
 MDS is used only for visualization. It does not affect clustering or the
 transition matrices.

@@ -11,11 +11,11 @@ enough to regenerate the case.
 
 The simulation uses the filtered incompressible Navier-Stokes equations:
 
-$$
+```math
 \nabla\cdot\overline{\boldsymbol{u}}=0,
-$$
+```
 
-$$
+```math
 \frac{\partial\overline{\boldsymbol{u}}}{\partial t}
 +\nabla\cdot
 \left(
@@ -28,11 +28,11 @@ $$
 2(\nu+\nu_{\mathrm{sgs}})
 \overline{\mathbf S}
 \right],
-$$
+```
 
 with strain-rate tensor
 
-$$
+```math
 \overline{\mathbf S}
 =
 \frac{1}{2}
@@ -40,23 +40,23 @@ $$
 \nabla\overline{\boldsymbol{u}}
 +\nabla\overline{\boldsymbol{u}}^{\mathsf T}
 \right).
-$$
+```
 
 The reference quantities are
 
-$$
+```math
 U_\infty=1,\qquad D=1,\qquad
 \nu=\frac{1}{3900}\approx2.5641\times10^{-4},
-$$
+```
 
 and therefore
 
-$$
+```math
 \mathrm{Re}_D
 =
 \frac{U_\infty D}{\nu}
 \approx3900.
-$$
+```
 
 OpenFOAM uses kinematic pressure $p/\rho$. Density is set to one for the force
 coefficients.
@@ -76,9 +76,9 @@ WALE constructs an eddy viscosity from the local velocity-gradient tensor and
 has the appropriate near-wall scaling without requiring a dynamic averaging
 procedure. The filter width is
 
-$$
+```math
 \Delta=V_{\mathrm{cell}}^{1/3}.
-$$
+```
 
 ## Domain and mesh
 
@@ -155,13 +155,13 @@ Courant limit.
 `system/controlDict` evaluates forces on the `cylinder` patch. With
 $U_\infty=1$, $\rho=1$, $D=1$, and span $L_z=4$, the reference area is
 
-$$
+```math
 A_{\mathrm{ref}}=DL_z=4.
-$$
+```
 
 The reported drag and lift coefficients follow
 
-$$
+```math
 C_D
 =
 \frac{F_x}{\tfrac12\rho U_\infty^2 A_{\mathrm{ref}}},
@@ -169,7 +169,7 @@ C_D
 C_L
 =
 \frac{F_y}{\tfrac12\rho U_\infty^2 A_{\mathrm{ref}}}.
-$$
+```
 
 The coefficient files are written below
 `postProcessing/forceCoeffs/` and are ignored by Git.
