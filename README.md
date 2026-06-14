@@ -288,7 +288,7 @@ Let run $r$ start at sample $s_r$ and end at sample $e_r$. With
 ```math
 \Delta t_{\mathrm{med}}
 =
-\operatorname{median}(t_{i+1}-t_i),
+\mathrm{median}\left(t_{i+1}-t_i\right),
 ```
 
 the implemented residence duration is
@@ -328,7 +328,7 @@ direct successor:
 ```math
 j^\star
 =
-\operatorname*{arg\,max}_{j}Q_{jk}.
+\arg\max_{j} Q_{jk}.
 ```
 
 During the interval
