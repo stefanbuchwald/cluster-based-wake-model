@@ -114,133 +114,29 @@ units and physical meanings.
 The complete snapshot matrix is stored locally as a memory-mapped `.npy` file.
 It is intentionally ignored by Git because it can be several gigabytes large.
 
-## Mathematical method
+## Method
 
-Let $N$ be the number of snapshots and $M$ the number of input features. The
-data matrix uses one snapshot per row:
+### POD and clustering
 
-```math
-\mathbf{X}
-=
-\begin{bmatrix}
-\boldsymbol{x}_1^{\mathsf T}\\
-\vdots\\
-\boldsymbol{x}_N^{\mathsf T}
-\end{bmatrix}
-\in \mathbb{R}^{N\times M}.
-```
+The input time series is centered and projected onto POD coordinates. Small
+feature matrices are decomposed directly by SVD; large VTK fields use the
+method of snapshots to avoid constructing a full spatial covariance matrix.
+The retained temporal coefficients form the state space for clustering.
 
-### 1. Mean subtraction and POD
+The number of retained modes is selected from the requested energy threshold,
+subject to `--n-modes-max`. A hard mode limit can therefore stop before the
+threshold is reached. For example, the existing 161-snapshot velocity-field
+run retained about 89.27% of the fluctuation energy in its first 30 modes.
 
-First, the temporal mean is removed:
+The reduced states are partitioned with k-means++ using 50 initializations and
+a fixed random seed. Cluster numbers are then reordered for readability: the
+most populated cluster becomes $C_0$, followed where possible by its most
+frequent outgoing transition. This relabeling does not change the partition.
 
-```math
-\overline{\boldsymbol{x}}
-=
-\frac{1}{N}\sum_{i=1}^{N}\boldsymbol{x}_i,
-\qquad
-\mathbf{X}'_{i,:}
-=
-\boldsymbol{x}_i^{\mathsf T}
--\overline{\boldsymbol{x}}^{\mathsf T}.
-```
+### Transition model
 
-For a small feature matrix, `run_cnm_analysis.py` computes the singular value
-decomposition directly:
-
-```math
-\mathbf{X}'
-=
-\mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^{\mathsf T}.
-```
-
-The columns of $\mathbf{V}$ are spatial or feature-space POD modes. The
-temporal POD coefficients used for clustering are
-
-```math
-\mathbf{A}
-=
-\mathbf{U}_r\boldsymbol{\Sigma}_r
-\in \mathbb{R}^{N\times r}.
-```
-
-For large VTK fields, `field_pod_from_vtk.py` uses the method of snapshots. It
-forms the much smaller temporal covariance matrix
-
-```math
-\mathbf{C}
-=
-\frac{1}{N-1}\mathbf{X}'\mathbf{X}'^{\mathsf T}
-\in \mathbb{R}^{N\times N}
-```
-
-and solves
-
-```math
-\mathbf{C}\boldsymbol{\psi}_k
-=
-\lambda_k\boldsymbol{\psi}_k.
-```
-
-The corresponding singular values and temporal coefficients are
-
-```math
-\sigma_k=\sqrt{(N-1)\lambda_k},
-\qquad
-a_k(t_i)=\sigma_k\psi_{ik}.
-```
-
-The modal energy fractions are
-
-```math
-e_k=\frac{\sigma_k^2}{\sum_\ell \sigma_\ell^2},
-\qquad
-E_r=\sum_{k=1}^{r}e_k.
-```
-
-The smallest $r$ satisfying the requested energy threshold is selected, unless
-`--n-modes-max` imposes a lower hard limit. Therefore, requesting
-`--energy-threshold 0.9999 --n-modes-max 30` does **not** guarantee that 30
-modes contain 99.99% of the energy. In the existing 161-snapshot field run,
-the first 30 velocity modes contained about 89.27%.
-
-When a POD `.npz` file is passed to `run_cnm_analysis.py`, the current
-implementation centers its coefficient matrix and performs another SVD before
-clustering. If all supplied dimensions are retained, this is an orthogonal
-change of coordinates and preserves Euclidean distances. An additional mode
-limit would perform a second truncation.
-
-### 2. k-means++ clustering
-
-Each row $\boldsymbol{a}_i$ of $\mathbf{A}$ is assigned to one of $K$ clusters.
-The centroids $\boldsymbol{c}_k$ minimize the within-cluster variance
-
-```math
-J
-=
-\sum_{k=0}^{K-1}
-\sum_{i:\,l_i=k}
-\left\|
-\boldsymbol{a}_i-\boldsymbol{c}_k
-\right\|_2^2.
-```
-
-The implementation uses k-means++ initialization, 50 restarts, and a fixed
-random seed. After fitting, cluster numbers are reordered for readability:
-the most populated cluster becomes $C_0$, followed where possible by its most
-frequent outgoing transition. This changes labels, not the clustering.
-
-The empirical occupation probability is
-
-```math
-p_k
-=
-\frac{1}{N}\sum_{i=1}^{N}\mathbb{1}(l_i=k).
-```
-
-### 3. CMM transition matrix
-
-For every pair of consecutive samples, define
+Let $l_i$ be the cluster label at sample $i$. For every pair of consecutive
+samples, define
 
 ```math
 n_{jk}
@@ -248,7 +144,7 @@ n_{jk}
 \#\left\{i:l_i=k,\ l_{i+1}=j\right\}.
 ```
 
-The cluster-based Markov model (CMM) matrix is column-stochastic:
+The sampled transition matrix is
 
 ```math
 P_{jk}
@@ -257,19 +153,19 @@ P_{jk}
 ```
 
 Thus, column $k$ contains the probability of the next sampled state, given
-that the current sampled state is $C_k$. Its diagonal contains persistence
-within a cluster.
+that the current state is $C_k$. Because consecutive samples in the same
+cluster are counted, the diagonal of $P$ measures persistence at the chosen
+sampling interval.
 
-### 4. Direct-transition matrix
-
-For the cluster-based network model, repeated labels are compressed into runs:
+For the cluster-based network model, repeated labels are first compressed into
+runs:
 
 ```text
 0, 0, 0, 2, 2, 1, 1  ->  0, 2, 1
 ```
 
 Let $\widehat n_{jk}$ count transitions between consecutive runs. Self
-transitions no longer occur. The direct-transition matrix is
+transitions no longer occur, and the direct-transition matrix becomes
 
 ```math
 Q_{jk}
@@ -281,7 +177,14 @@ Q_{jk}
 
 Columns with no observed departure remain zero.
 
-### 5. Residence and transition times
+This distinction is important:
+
+- `P` describes the next sampled label and depends directly on the sampling
+  interval.
+- `Q` describes the next different cluster after the current cluster is left.
+- `T` supplies the characteristic time needed for that direct transition.
+
+### Transition times
 
 Let run $r$ start at sample $s_r$ and end at sample $e_r$. With
 
@@ -320,7 +223,7 @@ T_{jk}
 
 Unobserved transitions are stored as `NaN`.
 
-### 6. Deterministic CNM reconstruction
+### Deterministic reconstruction
 
 Starting from cluster $k$, the current implementation chooses the most likely
 direct successor:
@@ -360,22 +263,11 @@ This reconstruction is deterministic. It does not sample from $Q$ and
 therefore cannot reproduce stochastic branching or provide uncertainty
 estimates.
 
-### 7. MDS visualization
+### Visualization
 
-Multidimensional scaling embeds snapshots and centroids into a three-dimensional
-plot by approximately preserving pairwise Euclidean distances:
-
-```math
-\min_{\boldsymbol{y}_i}
-\sum_{i<j}
-\left(
-\|\boldsymbol{y}_i-\boldsymbol{y}_j\|_2
--d_{ij}
-\right)^2.
-```
-
-MDS is used only for visualization. It does not affect clustering or the
-transition matrices.
+Multidimensional scaling embeds snapshots and centroids into three dimensions
+for the cluster map. It is only a visualization step and does not affect the
+clustering, transition matrices, or reconstruction.
 
 ## Running the analysis
 
