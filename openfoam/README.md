@@ -248,10 +248,6 @@ cd openfoam/cases/cylinderLES3D
 `Allview` reconstructs the latest parallel time when processor directories
 exist and then starts `paraFoam`.
 
-The Lambda2 helper scripts in the case directory are optional ParaView/Python
-tools. For vortex visualization, negative Lambda2 isosurfaces are commonly
-used. Their generated `.vtu`, `.pvd`, frame, and video files are ignored.
-
 ## Cleaning local results
 
 `Allclean` removes the generated mesh, processor directories, numerical time
@@ -287,5 +283,5 @@ openfoam/
     |-- Allclean
     |-- Allkill
     |-- Allview
-    `-- optional Python post-processing helpers
+    `-- calcRe.py
 ```

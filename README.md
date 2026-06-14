@@ -43,8 +43,7 @@ data analysis and its mathematics.
 |   |   `-- run_cnm_analysis.py
 |   `-- requirements.txt
 |-- scripts/sweep_cnm_windows.sh
-|-- postprocessing.sh
-`-- package_project.sh
+`-- postprocessing.sh
 ```
 
 The files below are generated locally and are not part of the repository:
@@ -335,8 +334,6 @@ These files are reproducible outputs and are ignored by Git.
 - Euclidean k-means assumes that the selected coordinates and their scaling
   define a physically meaningful distance.
 - The deterministic `argmax(Q)` trajectory suppresses less likely transitions.
-- DMD and the importable `python/src/` library are placeholders, not finished
-  implementations.
 
 ## Keeping Git small
 
@@ -348,14 +345,6 @@ git status --short
 git check-ignore -v data/processed/example.npy
 git check-ignore -v openfoam/cases/cylinderLES3D/VTK/example.vtk
 ```
-
-A source-only ZIP can be created with:
-
-```bash
-./package_project.sh
-```
-
-The script writes the archive to `dist/`, which is itself ignored.
 
 ## References
 

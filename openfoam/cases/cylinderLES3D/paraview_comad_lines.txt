@@ -1,6 +1,0 @@
-view = GetActiveView()
-print("CameraPosition =", view.CameraPosition)
-print("CameraFocalPoint =", view.CameraFocalPoint)
-print("CameraViewUp =", view.CameraViewUp)
-print("CameraParallelProjection =", view.CameraParallelProjection)
-print("CameraParallelScale =", getattr(view, "CameraParallelScale", None))

@@ -24,6 +24,22 @@ htmlcov/
 .env.*
 !.env.example
 
+# Local or retired project helpers
+/analysie.sh
+/package_project.sh
+/python/notebooks/
+/python/src/
+/python/scripts/run_pod_dmd.py
+/openfoam/scripts/
+/openfoam/cases/cylinderLES3D/enter_venv.sh
+/openfoam/cases/cylinderLES3D/temptrack.sh
+/openfoam/cases/cylinderLES3D/temux_cfd.sh
+/openfoam/cases/cylinderLES3D/paraview_comad_lines.txt
+/openfoam/cases/cylinderLES3D/export_lambda2_pvd.py
+/openfoam/cases/cylinderLES3D/lambda2_render.py
+/openfoam/cases/cylinderLES3D/lambda2_stats.py
+/openfoam/cases/cylinderLES3D/render_lambda2_series.py
+
 # Generated project data
 data/*
 !data/README.md
