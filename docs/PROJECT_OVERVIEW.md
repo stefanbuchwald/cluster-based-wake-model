@@ -179,7 +179,7 @@ Current local input files for the final reference run:
 
 ```text
 data/processed/forceCoeffs_merged_t0_300.dat
-data/processed/pod_U_t140_270.npz
+data/processed/pod_U_volume_t140_270.npz
 ```
 
 Both files are generated artifacts and are ignored by Git.
@@ -359,34 +359,31 @@ The Strouhal number is
 St = \frac{\operatorname{Im}(\omega)}{2\pi}\frac{D}{U_\infty}.
 ```
 
-For the final run, the CNM cycle frequencies and nearest DMD modes agree well:
-
-| Cycle | CNM reference | DMD mode | Difference |
-|---|---:|---:|---:|
-| main shedding | `St = 0.203` | `St = 0.203511` | `0.000511` |
-| sub-harmonic | `St = 0.136` | `St = 0.136337` | `0.000337` |
-
-This is the strongest result of the project: the sparse transition network
-finds physically meaningful cycle frequencies, and DMD independently recovers
-matching spectral content.
+In the corrected release workflow, CNM cycle frequencies are computed from the
+actual supported `Q/T` network and DMD modes are ranked independently before
+comparison. The volume-weighted release run found a dominant supported CNM
+cycle near `St = 0.20415` with minimum edge support 25. The nearest independently
+ranked DMD candidate is `St = 0.20540` with amplitude rank 2 and growth rate
+`-6.63e-3`. This should be reported conceptually as agreement around
+`St ≈ 0.20`, with exact values kept in the JSON summaries.
 
 ## 10. Reproducing the Final Result Folder
 
 The current reference folder is:
 
 ```text
-data/figures/final_t140_270_K10_rerun/
+data/figures/final_release_volume_t140_270_K10/
 ```
 
 Recreate it from the existing local generated files with:
 
 ```bash
-cd /home/stefan/Uni/cfd_rom_regime_clustering_cylinder
+# from the repository root
 source .venv/bin/activate
 export MPLCONFIGDIR=/tmp/matplotlib
 
-OUT="data/figures/final_t140_270_K10_rerun"
-NPZ="data/processed/pod_U_t140_270.npz"
+OUT="data/figures/final_release_volume_t140_270_K10"
+NPZ="data/processed/pod_U_volume_t140_270.npz"
 FORCE="data/processed/forceCoeffs_merged_t0_300.dat"
 
 mkdir -p "$OUT"
@@ -403,25 +400,26 @@ python python/scripts/run_cnm_analysis.py \
     --out "$OUT" \
     --K 10 \
     --n-runs 200 \
-    --random-state 1
-
-mv "$OUT/summary.json" "$OUT/cnm_summary.json"
+    --random-state 1 \
+    --min-cycle-count 2
 
 python python/scripts/run_dmd_analysis.py \
     --input "$NPZ" \
     --out "$OUT" \
     --dt 0.25
 
-mv "$OUT/summary.json" "$OUT/dmd_summary.json"
+python python/scripts/plot_release_diagnostics.py \
+    --out "$OUT"
 
+# Optional spatial DMD slice for the selected mode:
 python python/scripts/dmd_mode_field.py \
     --npz "$NPZ" \
     --dmd-summary "$OUT/dmd_summary.json" \
     --dmd-dir "$OUT" \
-    --mode-st 0.203 \
+    --mode-st 0.205403 \
     --component x \
     --z-slice 2.0 \
-    --out "$OUT/14_dmd_mode_field_St0203.png"
+    --out "$OUT/14_dmd_mode_field_St0205.png"
 ```
 
 Important plots:
@@ -433,9 +431,13 @@ Important plots:
 | `02_mds_clusters.png` | visualizes clustered state space |
 | `04_Q_matrix.png` | main CNM transition probabilities |
 | `05_T_matrix.png` | direct transition times |
-| `10_dmd_spectrum.png` | DMD/CNM frequency agreement |
-| `12_cluster_probabilities_probabilistic.png` | probabilistic improvement over deterministic path |
-| `14_dmd_mode_field_St0203.png` | spatial DMD mode for main shedding |
+| `10_dmd_spectrum.png` | independent DMD amplitude spectrum |
+| `05b_transition_counts.png` | finite-sample support for direct transitions |
+| `network_cycles.json` | supported directed cycles from Q/T |
+| `12_cluster_probabilities_probabilistic.png` | training-window occupation reproduction diagnostic |
+| `14_dmd_mode_field_St0205.png` | optional spatial DMD mode for the selected DMD candidate |
+| `15_network_cycle_support.png` | dominant CNM cycle with transition support and times |
+| `16_cnm_dmd_frequency_comparison.png` | compact CNM/DMD comparison around `St ≈ 0.20` |
 
 ## 11. Interpretation and Limitations
 

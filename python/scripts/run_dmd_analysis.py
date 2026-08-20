@@ -3,8 +3,8 @@
 
 Example:
     python3 python/scripts/run_dmd_analysis.py \
-        --input data/processed/pod_U_t140_270.npz \
-        --out data/figures/dmd_U_t140_270 \
+        --input data/processed/pod_U_volume_t140_270.npz \
+        --out data/figures/dmd_U_volume_t140_270 \
         --dt 0.25
 """
 
@@ -26,12 +26,8 @@ if str(PYTHON_SRC) not in sys.path:
     sys.path.insert(0, str(PYTHON_SRC))
 
 from rom.dmd import exact_dmd, reconstruct_dmd
+from rom.provenance import provenance
 
-
-CNM_FREQUENCIES = {
-    "main_cycle": 0.203,
-    "sub_harmonic": 0.136,
-}
 
 
 def read_npz_matrix(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
@@ -135,61 +131,59 @@ def growth_interpretation(growth_rate: float, tolerance: float) -> str:
     return "neutral / limit-cycle-like"
 
 
-def compare_with_cnm(
+def candidate_dmd_modes(
     result: dict,
-    growth_tolerance: float,
     frequency_tolerance: float,
+    growth_tolerance: float,
 ) -> list[dict]:
-    """Match each CNM cycle to the nearest distinct positive DMD frequency."""
-    indices = leading_positive_modes(
-        result=result,
-        count=int(result["r"]),
-        frequency_tolerance=frequency_tolerance,
-    )
+    """Return independently ranked positive-frequency DMD candidates."""
+    frequencies = np.asarray(result["frequencies_St"], dtype=float)
+    amplitudes = np.abs(result["amplitudes"])
+    order = amplitude_order(result)
+    amplitude_rank = {int(index): rank for rank, index in enumerate(order, start=1)}
+    candidates = []
+    seen_frequencies: list[float] = []
 
-    if not indices:
-        return []
-
-    references = list(CNM_FREQUENCIES.items())
-    if len(indices) == 1:
-        reference = min(
-            references,
-            key=lambda item: abs(
-                float(result["frequencies_St"][indices[0]]) - item[1]
-            ),
-        )
-        assignments = [(reference, indices[0])]
-    else:
-        candidate_pairs = permutations(indices, len(references))
-        best_indices = min(
-            candidate_pairs,
-            key=lambda assignment: sum(
-                abs(float(result["frequencies_St"][idx]) - reference[1])
-                for reference, idx in zip(references, assignment)
-            ),
-        )
-        assignments = list(zip(references, best_indices))
-
-    comparison = []
-    for (reference_name, reference_frequency), index in assignments:
-        frequency = float(result["frequencies_St"][index])
+    for index in order:
+        index = int(index)
+        frequency = float(frequencies[index])
+        if frequency <= frequency_tolerance:
+            continue
+        if any(abs(frequency - old) <= frequency_tolerance for old in seen_frequencies):
+            continue
+        seen_frequencies.append(frequency)
+        eigenvalue = complex(result["eigenvalues"][index])
         growth_rate = float(result["growth_rates"][index])
-        comparison.append(
+        candidates.append(
             {
-                "mode_index": int(index),
-                "dmd_St": frequency,
-                "cnm_cycle": reference_name,
-                "cnm_St": float(reference_frequency),
-                "absolute_difference": abs(frequency - reference_frequency),
+                "mode_index": index,
+                "St": frequency,
                 "growth_rate": growth_rate,
                 "growth_interpretation": growth_interpretation(
                     growth_rate,
                     growth_tolerance,
                 ),
+                "amplitude": float(amplitudes[index]),
+                "relative_amplitude_rank": int(amplitude_rank[index]),
+                "eigenvalue_abs": float(abs(eigenvalue)),
+                "eigenvalue_real": float(eigenvalue.real),
+                "eigenvalue_imag": float(eigenvalue.imag),
             }
         )
 
-    return comparison
+    return candidates
+
+
+def conjugate_closed_indices(result: dict, indices: np.ndarray, tolerance: float = 1e-8) -> np.ndarray:
+    """Add conjugate partners for selected complex DMD eigenvalues when present."""
+    eigenvalues = np.asarray(result["eigenvalues"])
+    selected = {int(i) for i in np.asarray(indices, dtype=int)}
+    for index in list(selected):
+        target = np.conj(eigenvalues[index])
+        partner = int(np.argmin(np.abs(eigenvalues - target)))
+        if abs(eigenvalues[partner] - target) <= tolerance:
+            selected.add(partner)
+    return np.asarray(sorted(selected), dtype=int)
 
 
 def save_eigenvalue_plot(result: dict, out: Path) -> None:
@@ -253,24 +247,14 @@ def save_spectrum_plot(result: dict, out: Path) -> None:
     plt.setp(stemlines, linewidth=1.2, color="tab:blue")
     baseline.set_visible(False)
 
-    plt.axvline(
-        CNM_FREQUENCIES["main_cycle"],
-        color="tab:red",
-        linestyle="--",
-        label="CNM main cycle: St = 0.203",
-    )
-    plt.axvline(
-        CNM_FREQUENCIES["sub_harmonic"],
-        color="tab:orange",
-        linestyle="--",
-        label="CNM sub-harmonic: St = 0.136",
-    )
     plt.yscale("log")
     plt.xlabel("Strouhal number St")
     plt.ylabel(r"Amplitude $|b|$ (log scale)")
     plt.title("DMD amplitude spectrum (steady mode excluded)")
     plt.grid(True, alpha=0.3, which="both")
-    plt.legend()
+    handles, labels = plt.gca().get_legend_handles_labels()
+    if labels:
+        plt.legend()
     plt.tight_layout()
     plt.savefig(out, dpi=200)
     plt.close()
@@ -281,6 +265,7 @@ def save_reconstruction_plot(
     X: np.ndarray,
     reconstruction: np.ndarray,
     out: Path,
+    title: str,
 ) -> None:
     n_coefficients = min(4, X.shape[1])
     plt.figure(figsize=(12, 2.7 * n_coefficients))
@@ -300,7 +285,7 @@ def save_reconstruction_plot(
         axis.legend(loc="best")
 
     plt.xlabel("Time")
-    plt.suptitle("Leading coefficient reconstruction", y=0.995)
+    plt.suptitle(title, y=0.995)
     plt.tight_layout()
     plt.savefig(out, dpi=200)
     plt.close()
@@ -321,8 +306,8 @@ def mode_record(result: dict, index: int) -> dict:
 def parse_args() -> argparse.Namespace:
     example = """example:
   python3 python/scripts/run_dmd_analysis.py \\
-      --input data/processed/pod_U_t140_270.npz \\
-      --out data/figures/dmd_U_t140_270 \\
+      --input data/processed/pod_U_volume_t140_270.npz \\
+      --out data/figures/dmd_U_volume_t140_270 \\
       --dt 0.25
 """
     parser = argparse.ArgumentParser(
@@ -370,15 +355,26 @@ def main() -> None:
         reference_velocity=args.reference_velocity,
     )
 
+    full_reconstruction = reconstruct_dmd(result=result, n_samples=len(time))
+    full_reconstruction_error = float(
+        np.linalg.norm(X - full_reconstruction) / max(np.linalg.norm(X), np.finfo(float).tiny)
+    )
+
     reconstruction_count = min(max(args.reconstruction_modes, 1), result["r"])
-    reconstruction_indices = amplitude_order(result)[:reconstruction_count]
-    reconstruction = reconstruct_dmd(
+    reconstruction_indices = conjugate_closed_indices(
+        result,
+        amplitude_order(result)[:reconstruction_count],
+    )
+    partial_reconstruction = reconstruct_dmd(
         result=result,
         n_samples=len(time),
         mode_indices=reconstruction_indices,
     )
+    partial_reconstruction_error = float(
+        np.linalg.norm(X - partial_reconstruction) / max(np.linalg.norm(X), np.finfo(float).tiny)
+    )
 
-    comparison = compare_with_cnm(
+    candidates = candidate_dmd_modes(
         result=result,
         growth_tolerance=args.growth_tolerance,
         frequency_tolerance=args.frequency_tolerance,
@@ -391,21 +387,18 @@ def main() -> None:
         "  SVD energy : "
         f"{result['cumulative_energy'][result['r'] - 1]:.8f}"
     )
-    print(f"  recon modes: {reconstruction_count}")
+    print(f"  partial modes: {len(reconstruction_indices)}")
+    print(f"  full retained reconstruction error: {full_reconstruction_error:.6e}")
+    print(f"  partial modal reconstruction error: {partial_reconstruction_error:.6e}")
 
     print("")
-    print("DMD vs CNM frequency comparison (nearest DMD modes):")
-    if comparison:
-        for number, item in enumerate(comparison, start=1):
-            label = item["cnm_cycle"].replace("_", " ")
+    print("Independent positive-frequency DMD candidates:")
+    if candidates:
+        for number, item in enumerate(candidates[:10], start=1):
             print(
-                f"  DMD mode {number}: St = {item['dmd_St']:.6f} "
-                f"(CNM {label}: St = {item['cnm_St']:.3f}, "
-                f"diff = {item['absolute_difference']:.6f})"
-            )
-            print(
-                f"    growth rate = {item['growth_rate']:.6e}: "
-                f"{item['growth_interpretation']}"
+                f"  {number}: mode {item['mode_index']}, St = {item['St']:.6f}, "
+                f"|b| rank = {item['relative_amplitude_rank']}, "
+                f"growth = {item['growth_rate']:.3e}"
             )
     else:
         print("  No non-trivial positive-frequency DMD mode found.")
@@ -419,15 +412,17 @@ def main() -> None:
     np.save(args.out / "dmd_growth_rates.npy", result["growth_rates"])
     np.save(args.out / "dmd_amplitudes.npy", result["amplitudes"])
     np.save(args.out / "dmd_modes.npy", result["modes"])
-    np.save(args.out / "dmd_reconstruction.npy", reconstruction)
+    np.save(args.out / "dmd_full_reconstruction.npy", full_reconstruction)
+    np.save(args.out / "dmd_partial_modal_reconstruction.npy", partial_reconstruction)
 
     save_eigenvalue_plot(result, args.out / "09_dmd_eigenvalues.png")
     save_spectrum_plot(result, args.out / "10_dmd_spectrum.png")
     save_reconstruction_plot(
         time=time,
         X=X,
-        reconstruction=reconstruction,
-        out=args.out / "11_dmd_mode_reconstruction.png",
+        reconstruction=partial_reconstruction,
+        out=args.out / "11_dmd_partial_modal_reconstruction.png",
+        title="Partial modal DMD reconstruction",
     )
 
     top_indices = amplitude_order(result)[: min(10, result["r"])]
@@ -446,20 +441,22 @@ def main() -> None:
         "svd_cumulative_energy_kept": float(
             result["cumulative_energy"][result["r"] - 1]
         ),
-        "reconstruction_modes": reconstruction_indices.tolist(),
+        "partial_reconstruction_modes": reconstruction_indices.tolist(),
+        "full_retained_relative_frobenius_error": full_reconstruction_error,
+        "partial_modal_relative_frobenius_error": partial_reconstruction_error,
         "top_modes_by_amplitude": [
             mode_record(result, int(index)) for index in top_indices
         ],
-        "cnm_frequency_comparison": comparison,
-        "cnm_reference_frequencies": CNM_FREQUENCIES,
+        "candidate_positive_frequency_modes": candidates,
         "outputs": {
             "eigenvalues_plot": "09_dmd_eigenvalues.png",
             "spectrum_plot": "10_dmd_spectrum.png",
-            "reconstruction_plot": "11_dmd_mode_reconstruction.png",
+            "partial_modal_reconstruction_plot": "11_dmd_partial_modal_reconstruction.png",
         },
+        "provenance": provenance(args.input),
     }
 
-    with (args.out / "summary.json").open("w", encoding="utf-8") as handle:
+    with (args.out / "dmd_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
 
     print("")

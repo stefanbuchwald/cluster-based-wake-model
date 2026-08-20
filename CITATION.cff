@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+title: "Cluster-Based Wake Model"
+message: "If you use this project, please cite it as below."
+type: software
+authors:
+  - family-names: Buchwald
+    given-names: Stefan
+repository-code: "https://github.com/stefanbuchwald/cluster-based-wake-model"
+abstract: "An interpretable cluster-based reduced-order analysis of a 3D cylinder-wake LES using POD, k-means, CMM/CNM transition models, and DMD."
+keywords:
+  - computational-fluid-dynamics
+  - reduced-order-modeling
+  - cylinder-wake
+  - POD
+  - DMD
+  - CNM
+license: MIT
+date-released: 2026-08-20

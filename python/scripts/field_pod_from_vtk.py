@@ -8,11 +8,12 @@ U only:
     python python/scripts/field_pod_from_vtk.py \
         --vtk-glob "openfoam/cases/cylinderLES3D/VTK/cylinderLES3D_*.vtk" \
         --fields U \
-        --out data/processed/pod_U_t140_270.npz \
+        --out data/processed/pod_U_volume_t140_270.npz \
         --time-start 140 \
         --time-step 0.25 \
         --energy-threshold 0.9999 \
-        --n-modes-max 30 \
+        --n-modes-max 200 \
+        --pod-weighting volume \
         --cell-stride 1
 
 U and p:
@@ -33,18 +34,31 @@ import argparse
 import glob
 import json
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_SRC = PROJECT_ROOT / "python" / "src"
+if str(PYTHON_SRC) not in sys.path:
+    sys.path.insert(0, str(PYTHON_SRC))
+
+from rom.pod import build_component_weights
+
 
 def natural_key(path: str) -> list:
+    """Sort paths with decimal time suffixes in physical time order."""
     name = Path(path).name
-    parts = re.split(r"(\d+)", name)
+    match = re.search(r"_([0-9]+(?:\.[0-9]+)?)\.vtk$", name)
+    if match:
+        return [name[: match.start(1)], float(match.group(1))]
+
+    parts = re.split(r"(\d+(?:\.\d+)?)", name)
     key = []
     for part in parts:
-        if part.isdigit():
-            key.append(int(part))
+        if re.fullmatch(r"\d+(?:\.\d+)?", part):
+            key.append(float(part))
         else:
             key.append(part)
     return key
@@ -143,6 +157,30 @@ def inspect_vtk_layout(
     return coordinates, layout
 
 
+def load_cell_volumes(path: Path, cell_stride: int) -> np.ndarray:
+    """Read finite-volume cell volumes from a VTK/OpenFOAM mesh."""
+    try:
+        import pyvista as pv
+    except ImportError as exc:
+        raise ImportError(
+            "pyvista is required. Install with: pip install pyvista vtk"
+        ) from exc
+
+    mesh = pv.read(str(path))
+    sized = mesh.compute_cell_sizes(length=False, area=False, volume=True)
+    if "Volume" not in sized.cell_data:
+        raise ValueError(
+            f"Could not obtain cell volumes from {path}. "
+            "Volume-weighted POD requires finite-volume cell volumes."
+        )
+    volumes = np.asarray(sized.cell_data["Volume"], dtype=float)[::cell_stride]
+    if volumes.ndim != 1 or volumes.size == 0:
+        raise ValueError("Cell volumes are empty.")
+    if not np.all(np.isfinite(volumes)) or np.any(volumes <= 0):
+        raise ValueError("Cell volumes must be finite and positive.")
+    return volumes
+
+
 def compute_times(
     n: int,
     time_start: float | None,
@@ -162,6 +200,7 @@ def method_of_snapshots_pod(
     chunk_features: int,
     energy_threshold: float,
     n_modes_max: int | None,
+    feature_weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
     """
     Returns:
@@ -170,6 +209,15 @@ def method_of_snapshots_pod(
     """
 
     X = np.load(matrix_path, mmap_mode="r")
+
+    if feature_weights is None:
+        weights = np.ones(n_features, dtype=np.float64)
+    else:
+        weights = np.asarray(feature_weights, dtype=np.float64)
+    if weights.shape != (n_features,):
+        raise ValueError(f"feature_weights must have shape ({n_features},), got {weights.shape}")
+    if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
+        raise ValueError("feature_weights must be finite and positive")
 
     print("")
     print("==> Computing mean field")
@@ -191,7 +239,7 @@ def method_of_snapshots_pod(
         j1 = min(j0 + chunk_features, n_features)
         block = np.asarray(X[:, j0:j1], dtype=np.float64)
         block -= mean[j0:j1]
-        C += block @ block.T
+        C += (block * weights[j0:j1][None, :]) @ block.T
         print(f"    covariance block {j0}:{j1}")
 
     if n_samples > 1:
@@ -245,6 +293,9 @@ def method_of_snapshots_pod(
         j1 = min(j0 + chunk_features, n_features)
         block = np.asarray(X[:, j0:j1], dtype=np.float64)
         block -= mean[j0:j1]
+        # Physical modes are W^{-1/2} times the right singular vectors of
+        # the weighted snapshot matrix X W^{1/2}, which simplifies to
+        # X^T U / S for centered physical snapshots.
         mode_block = block.T @ retained_evecs
         mode_block /= retained_singular_values[None, :]
         spatial_modes[j0:j1, :] = mode_block.astype(dtype, copy=False)
@@ -285,6 +336,13 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Scale pressure before concatenating with velocity.",
+    )
+
+    parser.add_argument(
+        "--pod-weighting",
+        choices=["volume", "uniform"],
+        default="volume",
+        help="POD inner-product weighting. Use volume for OpenFOAM finite-volume fields.",
     )
 
     parser.add_argument(
@@ -335,6 +393,7 @@ def main() -> None:
     print(f"    last : {files[-1]}")
     print(f"    fields: {args.fields}")
     print(f"    cell_stride: {args.cell_stride}")
+    print(f"    pod_weighting: {args.pod_weighting}")
 
     first_vec = load_vtk_snapshot(
         path=files[0],
@@ -351,6 +410,18 @@ def main() -> None:
         fields=args.fields,
         cell_stride=args.cell_stride,
     )
+    cell_volumes = None
+    feature_weights = None
+    if args.pod_weighting == "volume":
+        cell_volumes = load_cell_volumes(files[0], cell_stride=args.cell_stride)
+        if len(cell_volumes) != field_layout["n_cells"]:
+            raise ValueError(
+                "Cell-volume count does not match sampled cells: "
+                f"{len(cell_volumes)} != {field_layout['n_cells']}"
+            )
+        feature_weights = build_component_weights(cell_volumes, field_layout)
+    else:
+        feature_weights = np.ones(n_features, dtype=np.float64)
 
     if field_layout["n_features"] != n_features:
         raise ValueError(
@@ -420,6 +491,7 @@ def main() -> None:
         chunk_features=args.chunk_features,
         energy_threshold=args.energy_threshold,
         n_modes_max=args.n_modes_max,
+        feature_weights=feature_weights,
     )
 
     print("")
@@ -452,6 +524,8 @@ def main() -> None:
         "energy_threshold": float(args.energy_threshold),
         "n_modes_max": args.n_modes_max,
         "n_modes": int(n_modes),
+        "pod_weighting": args.pod_weighting,
+        "inner_product": "sum_c V_c u_c dot v_c" if args.pod_weighting == "volume" else "uniform Euclidean feature inner product",
         "snapshot_matrix": str(matrix_path),
         "field_layout": field_layout,
     }
@@ -467,6 +541,8 @@ def main() -> None:
         n_modes=np.array([n_modes]),
         spatial_modes=spatial_modes,
         coordinates=coordinates,
+        cell_volumes=np.array([] if cell_volumes is None else cell_volumes),
+        feature_weights=feature_weights,
         field_shape=np.array(json.dumps(field_layout)),
         fields=np.array(args.fields),
         vtk_files=np.array([str(f) for f in files]),

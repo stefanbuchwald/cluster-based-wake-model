@@ -135,10 +135,12 @@ The retained temporal coefficients form the state space for clustering.
 
 The number of retained modes is selected from the requested energy threshold,
 subject to `--n-modes-max`. A hard mode limit can therefore stop before the
-threshold is reached. The final field-based analysis uses
-`data/processed/pod_U_t140_270.npz`, whose 200 stored POD coefficients contain
-essentially all retained snapshot energy; re-projecting these coefficients in
-`run_cnm_analysis.py` keeps 131 modes for the `0.9999` energy threshold.
+threshold is reached. For OpenFOAM field snapshots, `field_pod_from_vtk.py` uses
+a finite-volume, volume-weighted POD by default. Schema-v2 field-POD NPZ files
+already contain POD coefficients, so `run_cnm_analysis.py` truncates these
+coefficients directly instead of applying a second POD. The current release run
+uses `data/processed/pod_U_volume_t140_270.npz`, which keeps 200 modes and
+retains about 99.71% of the volume-weighted fluctuation energy.
 
 The reduced states are partitioned with k-means++ using 50 initializations and
 a fixed random seed. Cluster numbers are then reordered for readability: the
@@ -295,9 +297,9 @@ store the spatial POD basis and cell-center coordinates, allowing a selected
 DMD mode to be projected back to the physical velocity or pressure field.
 
 Discrete eigenvalues are converted to continuous growth rates and Strouhal
-numbers. The runner compares the DMD frequencies nearest to the two CNM cycle
-frequencies, while separately reporting the modes with the largest fitted
-amplitudes.
+numbers. The runner reports independently ranked positive-frequency DMD
+candidates; the release diagnostic plot then compares these candidates with
+cycle frequencies measured from the supported CNM `Q/T` network.
 
 ## Running the analysis
 
@@ -321,15 +323,16 @@ VTK series:
 python python/scripts/field_pod_from_vtk.py \
     --vtk-glob "openfoam/cases/cylinderLES3D/VTK/cylinderLES3D_*.vtk" \
     --fields U \
-    --out data/processed/pod_U_t140_270.npz \
+    --out data/processed/pod_U_volume_t140_270.npz \
     --time-start 140 \
     --time-step 0.25 \
     --energy-threshold 0.9999 \
-    --n-modes-max 200
+    --n-modes-max 200 \
+    --pod-weighting volume
 
 python python/scripts/run_cnm_analysis.py \
     --input-type npz \
-    --input data/processed/pod_U_t140_270.npz \
+    --input data/processed/pod_U_volume_t140_270.npz \
     --out data/figures/cnm_field_K10 \
     --K 10 \
     --n-runs 200
@@ -345,18 +348,18 @@ For an exact-DMD comparison using the field POD coefficients:
 
 ```bash
 python python/scripts/run_dmd_analysis.py \
-    --input data/processed/pod_U_t140_270.npz \
-    --out data/figures/dmd_U_t140_270 \
+    --input data/processed/pod_U_volume_t140_270.npz \
+    --out data/figures/dmd_U_volume_t140_270 \
     --dt 0.25
 
 python python/scripts/dmd_mode_field.py \
-    --npz data/processed/pod_U_t140_270.npz \
-    --dmd-summary data/figures/dmd_U_t140_270/summary.json \
-    --dmd-dir data/figures/dmd_U_t140_270 \
-    --mode-st 0.203 \
+    --npz data/processed/pod_U_volume_t140_270.npz \
+    --dmd-summary data/figures/dmd_U_volume_t140_270/dmd_summary.json \
+    --dmd-dir data/figures/dmd_U_volume_t140_270 \
+    --mode-st 0.205403 \
     --component x \
     --z-slice 2.0 \
-    --out data/figures/dmd_U_t140_270/14_dmd_mode_field_St0203.png
+    --out data/figures/dmd_U_volume_t140_270/14_dmd_mode_field_St0205.png
 ```
 
 The spatial plot requires a schema-v2 NPZ produced by the current
@@ -386,8 +389,8 @@ developed interval `t=140` to `t=270`:
 source .venv/bin/activate
 export MPLCONFIGDIR=/tmp/matplotlib
 
-OUT="data/figures/final_t140_270_K10_rerun"
-NPZ="data/processed/pod_U_t140_270.npz"
+OUT="data/figures/final_release_volume_t140_270_K10"
+NPZ="data/processed/pod_U_volume_t140_270.npz"
 FORCE="data/processed/forceCoeffs_merged_t0_300.dat"
 
 mkdir -p "$OUT"
@@ -404,29 +407,30 @@ python python/scripts/run_cnm_analysis.py \
     --out "$OUT" \
     --K 10 \
     --n-runs 200 \
-    --random-state 1
-
-mv "$OUT/summary.json" "$OUT/cnm_summary.json"
+    --random-state 1 \
+    --min-cycle-count 2
 
 python python/scripts/run_dmd_analysis.py \
     --input "$NPZ" \
     --out "$OUT" \
     --dt 0.25
 
-mv "$OUT/summary.json" "$OUT/dmd_summary.json"
+python python/scripts/plot_release_diagnostics.py \
+    --out "$OUT"
 
+# Optional spatial DMD slice for the selected mode:
 python python/scripts/dmd_mode_field.py \
     --npz "$NPZ" \
     --dmd-summary "$OUT/dmd_summary.json" \
     --dmd-dir "$OUT" \
-    --mode-st 0.203 \
+    --mode-st 0.205403 \
     --component x \
     --z-slice 2.0 \
-    --out "$OUT/14_dmd_mode_field_St0203.png"
+    --out "$OUT/14_dmd_mode_field_St0205.png"
 ```
 
 This reproduces the current reference folder without requiring fresh VTK
-exports, as long as `pod_U_t140_270.npz` is still present locally. The NPZ file
+exports, as long as `pod_U_volume_t140_270.npz` is still present locally. The NPZ file
 is a generated artifact and is intentionally not committed.
 
 ## Outputs
@@ -440,16 +444,21 @@ Each run writes a local result directory containing:
 | `03_P_matrix.png` | sampled CMM transition matrix |
 | `04_Q_matrix.png` | direct CNM transition matrix |
 | `05_T_matrix.png` | mean direct-transition times |
+| `05b_transition_counts.png` | finite-sample support of direct transitions |
 | `06_cluster_affiliation.png` | data and predicted cluster labels |
 | `07_first_coefficients.png` | leading coefficients and reconstruction |
 | `08_cluster_probabilities.png` | measured and predicted occupations |
 | `09_dmd_eigenvalues.png` | discrete DMD eigenvalues and unit circle |
 | `10_dmd_spectrum.png` | DMD amplitudes over Strouhal number |
-| `11_dmd_mode_reconstruction.png` | leading coefficients and DMD reconstruction |
+| `11_dmd_partial_modal_reconstruction.png` | partial modal DMD reconstruction |
 | `12_cluster_probabilities_probabilistic.png` | data, deterministic CNM, and probabilistic CMM occupations |
 | `13_coefficients_probabilistic.png` | deterministic reconstruction and probabilistic ensemble band |
-| `14_dmd_mode_field_St0203.png` | selected DMD mode projected to a physical field slice |
-| `summary.json` | run parameters and basic statistics |
+| `14_dmd_mode_field_St0205.png` | optional selected DMD mode projected to a physical field slice |
+| `15_network_cycle_support.png` | dominant CNM cycle with transition support and times |
+| `16_cnm_dmd_frequency_comparison.png` | compact comparison of independently obtained CNM and DMD frequencies |
+| `cnm_summary.json` | CNM/CMM parameters, transition support, cycles, and provenance |
+| `dmd_summary.json` | DMD rank, reconstruction diagnostics, candidate modes, and provenance |
+| `network_cycles.json` | directed cycles found from the supported Q/T network |
 | `*.npy` | numeric intermediate results |
 
 These files are reproducible outputs and are ignored by Git.
@@ -471,18 +480,20 @@ with quantified uncertainty.
 - **Finite transition statistics.** Entries of `Q` and `T` are empirical
   estimates. Rare transitions may be based on very few observations, and a
   cluster with no observed departure becomes an absorbing state in the
-  deterministic reconstruction. The current output does not report transition
-  counts or confidence intervals.
+  deterministic reconstruction. The corrected output reports direct transition
+  counts so strong-looking probabilities can be interpreted with their sample
+  support.
 - **State representation matters.** A model built from $C_D$, $C_L$, and $C_M$
   describes force dynamics, but distinct flow fields can share similar force
   coefficients. Field-based POD contains more spatial information, while its
   result depends on the retained modes and on any scaling between velocity and
   pressure.
 - **Centroid dynamics.** The deterministic reference follows `argmax(Q)`.
-  The probabilistic CMM samples branches from $P$, but both models interpolate
-  between fixed cluster centroids. They do not reproduce within-cluster
-  turbulent fluctuations. The ensemble spread represents transition sampling,
-  not complete physical or statistical uncertainty.
+  The probabilistic CMM samples branches from $P$ with one fixed data time step
+  per Markov step. It does not use CNM transition times $T$; persistence is
+  already encoded by self-transitions in $P$. The ensemble spread represents
+  empirical transition sampling, not complete physical or statistical
+  uncertainty.
 - **Single-operator DMD.** Exact DMD fits one autonomous linear operator over
   the complete analysis window. A trajectory whose oscillation envelope first
   grows and later decays is therefore not expected to be reconstructed

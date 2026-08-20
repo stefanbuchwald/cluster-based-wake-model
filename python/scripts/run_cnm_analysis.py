@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -28,6 +29,14 @@ import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.manifold import MDS
 from sklearn.preprocessing import StandardScaler
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_SRC = PROJECT_ROOT / "python" / "src"
+if str(PYTHON_SRC) not in sys.path:
+    sys.path.insert(0, str(PYTHON_SRC))
+
+from rom import transitions as rom_transitions
+from rom.provenance import provenance
 
 
 # ---------------------------------------------------------------------------
@@ -117,21 +126,30 @@ def force_coeffs_to_matrix(
     return time, X, used_columns
 
 
-def read_npz_matrix(path: Path) -> tuple[np.ndarray, np.ndarray]:
+def read_npz_matrix(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
     if not path.exists():
         raise FileNotFoundError(path)
 
-    data = np.load(path)
+    with np.load(path, allow_pickle=False) as data:
+        if "X" not in data:
+            raise ValueError(f"{path} must contain key 'X'")
 
-    if "X" not in data:
-        raise ValueError(f"{path} must contain key 'X'")
+        X = np.asarray(data["X"], dtype=float)
 
-    X = np.asarray(data["X"], dtype=float)
+        if "time" in data:
+            time = np.asarray(data["time"], dtype=float)
+        else:
+            time = np.arange(X.shape[0], dtype=float)
 
-    if "time" in data:
-        time = np.asarray(data["time"], dtype=float)
-    else:
-        time = np.arange(X.shape[0], dtype=float)
+        metadata = {}
+        if "meta_json" in data:
+            try:
+                metadata = json.loads(str(data["meta_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+        for key in ("energy", "cumulative_energy", "singular_values", "n_modes"):
+            if key in data:
+                metadata[f"npz_{key}"] = np.asarray(data[key]).tolist()
 
     if X.ndim != 2:
         raise ValueError(f"Expected X to be 2D, got {X.shape}")
@@ -139,7 +157,7 @@ def read_npz_matrix(path: Path) -> tuple[np.ndarray, np.ndarray]:
     if time.ndim != 1 or len(time) != X.shape[0]:
         raise ValueError(f"time must have length {X.shape[0]}, got {time.shape}")
 
-    return time, X
+    return time, X, metadata
 
 
 # ---------------------------------------------------------------------------
@@ -319,68 +337,8 @@ def run_length_encoding(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.
 
 
 def cnm_matrices(labels: np.ndarray, time: np.ndarray, K: int) -> dict:
-    labels = labels.astype(int)
-    time = np.asarray(time, dtype=float)
-
-    if len(labels) != len(time):
-        raise ValueError(f"labels/time mismatch: {len(labels)} vs {len(time)}")
-
-    P = transition_matrix_P(labels, K)
-
-    run_labels, run_start, run_end = run_length_encoding(labels)
-
-    dt_default = float(np.median(np.diff(time))) if len(time) >= 2 else 1.0
-
-    residence_by_run = []
-    residence_times = {k: [] for k in range(K)}
-
-    for lab, i0, i1 in zip(run_labels, run_start, run_end):
-        duration = float(time[i1] - time[i0] + dt_default)
-        duration = max(duration, dt_default)
-
-        residence_by_run.append(duration)
-        residence_times[int(lab)].append(duration)
-
-    Q_counts = np.zeros((K, K), dtype=float)
-    T_sums = np.zeros((K, K), dtype=float)
-
-    for r in range(len(run_labels) - 1):
-        k = int(run_labels[r])
-        j = int(run_labels[r + 1])
-
-        if j == k:
-            continue
-
-        individual_T = 0.5 * residence_by_run[r] + 0.5 * residence_by_run[r + 1]
-
-        Q_counts[j, k] += 1.0
-        T_sums[j, k] += individual_T
-
-    col_sum = Q_counts.sum(axis=0, keepdims=True)
-
-    Q = np.divide(
-        Q_counts,
-        col_sum,
-        out=np.zeros_like(Q_counts),
-        where=col_sum > 0,
-    )
-
-    T = np.divide(
-        T_sums,
-        Q_counts,
-        out=np.full_like(T_sums, np.nan),
-        where=Q_counts > 0,
-    )
-
-    return {
-        "P": P,
-        "Q": Q,
-        "T": T,
-        "residence_times": residence_times,
-        "run_labels": run_labels,
-        "run_start_idx": run_start,
-        "run_end_idx": run_end,
-    }
+    """Compute CMM/CNM matrices using censored endpoint-run diagnostics."""
+    return rom_transitions.cnm_matrices(labels=labels, time=time, K=K)
 
 
 def deterministic_cnm_prediction(
@@ -480,11 +438,16 @@ def probabilistic_cmm_prediction(
     n_runs: int,
     rng: np.random.Generator,
 ) -> dict:
-    """Sample CMM trajectories from the full transition matrix ``P``."""
+    """Sample CMM trajectories from ``P`` with one fixed time step per sample.
+
+    ``P`` includes self-transitions. Therefore ordinary persistence is already
+    represented by repeated sampled states and CNM transition times ``T`` are not
+    applied in this model. ``T`` is accepted only for backward-compatible caller
+    signatures and is intentionally unused.
+    """
     time = np.asarray(time, dtype=float)
     centers = np.asarray(centers, dtype=float)
     P = np.asarray(P, dtype=float)
-    T = np.asarray(T, dtype=float)
 
     if n_runs < 1:
         raise ValueError("n_runs must be at least 1")
@@ -492,12 +455,8 @@ def probabilistic_cmm_prediction(
         raise ValueError("time must not be empty")
 
     K, n_features = centers.shape
-    if P.shape != (K, K) or T.shape != (K, K):
-        raise ValueError("P and T must both have shape (K, K)")
-
-    dt_default = float(np.median(np.diff(time))) if len(time) >= 2 else 1.0
-    positive_T = T[np.isfinite(T) & (T > 0)]
-    fallback_T = float(np.median(positive_T)) if positive_T.size else dt_default
+    if P.shape != (K, K):
+        raise ValueError("P must have shape (K, K)")
 
     pred_labels_runs = np.empty((n_runs, len(time)), dtype=int)
     pred_A_runs = np.empty((n_runs, len(time), n_features), dtype=float)
@@ -506,42 +465,21 @@ def probabilistic_cmm_prediction(
         labels = pred_labels_runs[run]
         coefficients = pred_A_runs[run]
         current = int(start_cluster)
-        idx = 0
+        labels[0] = current
+        coefficients[0, :] = centers[current]
 
-        while idx < len(time):
+        for idx in range(1, len(time)):
             probabilities = np.asarray(P[:, current], dtype=float).copy()
             probabilities[~np.isfinite(probabilities)] = 0.0
             probabilities = np.clip(probabilities, 0.0, None)
             probability_sum = float(probabilities.sum())
 
-            if probability_sum <= 0:
-                nxt = current
-            else:
+            if probability_sum > 0:
                 probabilities /= probability_sum
-                nxt = int(rng.choice(K, p=probabilities))
+                current = int(rng.choice(K, p=probabilities))
 
-            if nxt == current:
-                labels[idx] = current
-                coefficients[idx, :] = centers[current]
-                idx += 1
-                continue
-
-            duration = float(T[nxt, current])
-            if not np.isfinite(duration) or duration <= 0:
-                duration = fallback_T
-
-            idx = _interpolate_transition(
-                time=time,
-                centers=centers,
-                pred_labels=labels,
-                pred_A=coefficients,
-                start_idx=idx,
-                t_depart=float(time[idx]),
-                duration=duration,
-                current=current,
-                nxt=nxt,
-            )
-            current = nxt
+            labels[idx] = current
+            coefficients[idx, :] = centers[current]
 
     mean_occupation = np.bincount(
         pred_labels_runs.reshape(-1),
@@ -549,6 +487,8 @@ def probabilistic_cmm_prediction(
     ) / pred_labels_runs.size
 
     return {
+        "model": "probabilistic_cmm",
+        "time_model": "one sampled P step per input time sample; CNM T not used",
         "pred_labels_runs": pred_labels_runs,
         "pred_A_runs": pred_A_runs,
         "pred_labels_mean_occupation": mean_occupation,
@@ -927,10 +867,17 @@ def parse_args() -> argparse.Namespace:
         help="Skip deterministic CNM reconstruction.",
     )
 
+    parser.add_argument(
+        "--min-cycle-count",
+        type=int,
+        default=2,
+        help="Minimum direct-transition count for edges used in cycle diagnostics.",
+    )
+
     return parser.parse_args()
 
 
-def load_input(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, list[str], bool]:
+def load_input(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, list[str], bool, dict]:
     if args.input_type == "force":
         df = read_force_coeffs(args.input)
 
@@ -944,10 +891,10 @@ def load_input(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, list[s
         # Force coefficients have different scales, so standardization is useful.
         standardize = True
 
-        return time, X, feature_names, standardize
+        return time, X, feature_names, standardize, {}
 
     if args.input_type == "npz":
-        time, X = read_npz_matrix(args.input)
+        time, X, metadata = read_npz_matrix(args.input)
 
         if args.t_min is not None or args.t_max is not None:
             mask = np.ones(len(time), dtype=bool)
@@ -965,7 +912,7 @@ def load_input(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, list[s
 
         standardize = args.standardize
 
-        return time, X, feature_names, standardize
+        return time, X, feature_names, standardize, metadata
 
     raise ValueError(f"Unsupported input type: {args.input_type}")
 
@@ -974,7 +921,7 @@ def main() -> None:
     args = parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    time, X, feature_names, standardize = load_input(args)
+    time, X, feature_names, standardize, input_metadata = load_input(args)
 
     if args.stride < 1:
         raise ValueError("--stride must be >= 1")
@@ -1002,14 +949,47 @@ def main() -> None:
             out=args.out / "00_force_coefficients.png",
         )
 
-    pod = compute_pod(
-        X=X,
-        energy_threshold=args.energy_threshold,
-        n_modes_max=args.n_modes_max,
-        standardize=standardize,
-    )
+    input_schema_version = input_metadata.get("schema_version")
+    is_field_pod_npz = args.input_type == "npz" and input_schema_version == 2
 
-    A = pod["coefficients"]
+    if is_field_pod_npz:
+        available_modes = X.shape[1]
+        cumulative = np.asarray(input_metadata.get("npz_cumulative_energy", []), dtype=float)
+        energy = np.asarray(input_metadata.get("npz_energy", []), dtype=float)
+        if cumulative.size >= available_modes:
+            n_modes = int(np.searchsorted(cumulative, args.energy_threshold) + 1)
+            n_modes = min(n_modes, available_modes)
+        else:
+            n_modes = available_modes
+        if args.n_modes_max is not None:
+            n_modes = min(n_modes, int(args.n_modes_max))
+        n_modes = max(1, n_modes)
+        A = X[:, :n_modes]
+        if energy.size < available_modes:
+            energy = np.full(available_modes, np.nan)
+        if cumulative.size < available_modes:
+            cumulative = np.full(available_modes, np.nan)
+            cumulative[n_modes - 1] = np.nan
+        pod = {
+            "n_modes": n_modes,
+            "energy": energy,
+            "cumulative_energy": cumulative,
+            "coefficients": A,
+            "input_handling": "schema-v2 field POD coefficients truncated directly; no second POD",
+            "available_modes": available_modes,
+            "weighting": input_metadata.get("pod_weighting", "unknown"),
+        }
+    else:
+        pod = compute_pod(
+            X=X,
+            energy_threshold=args.energy_threshold,
+            n_modes_max=args.n_modes_max,
+            standardize=standardize,
+        )
+        A = pod["coefficients"]
+        pod["input_handling"] = "generic feature matrix reduced by POD/SVD"
+        pod["available_modes"] = int(X.shape[1])
+        pod["weighting"] = "feature-space"
 
     print("")
     print("POD/SVD:")
@@ -1037,6 +1017,12 @@ def main() -> None:
         print(f"    C{k}: {p:.5f}")
 
     cnm = cnm_matrices(labels=labels, time=time, K=args.K)
+    cycles = rom_transitions.enumerate_cycles(
+        Q=cnm["Q"],
+        T=cnm["T"],
+        counts=cnm["Q_counts"],
+        min_count=args.min_cycle_count,
+    )
 
     if args.no_cnm_prediction:
         pred_labels = None
@@ -1104,6 +1090,10 @@ def main() -> None:
     np.save(args.out / "P_matrix.npy", cnm["P"])
     np.save(args.out / "Q_matrix.npy", cnm["Q"])
     np.save(args.out / "T_matrix.npy", cnm["T"])
+    np.save(args.out / "transition_counts.npy", cnm["Q_counts"])
+    np.save(args.out / "P_transition_counts.npy", cnm["P_counts"])
+    with (args.out / "network_cycles.json").open("w", encoding="utf-8") as handle:
+        json.dump(cycles, handle, indent=2)
 
     if pred_labels is not None:
         np.save(args.out / "cnm_pred_labels.npy", pred_labels)
@@ -1160,6 +1150,13 @@ def main() -> None:
         value_label="time",
     )
 
+    save_matrix_plot(
+        M=cnm["Q_counts"],
+        title="Direct transition support counts",
+        out=args.out / "05b_transition_counts.png",
+        value_label="count",
+    )
+
     save_cluster_affiliation_plot(
         time=time,
         labels=labels,
@@ -1206,6 +1203,7 @@ def main() -> None:
         "P": "03_P_matrix.png",
         "Q": "04_Q_matrix.png",
         "T": "05_T_matrix.png",
+        "transition_counts": "05b_transition_counts.png",
         "affiliation": "06_cluster_affiliation.png",
         "coefficients": "07_first_coefficients.png",
         "probabilities": "08_cluster_probabilities.png",
@@ -1227,24 +1225,44 @@ def main() -> None:
         "time_max": float(time.max()),
         "stride": int(args.stride),
         "K": int(args.K),
+        "input_schema_version": input_schema_version,
+        "pod_input_handling": pod["input_handling"],
+        "pod_available_modes": int(pod["available_modes"]),
+        "pod_retained_modes": int(pod["n_modes"]),
         "pod_n_modes": int(pod["n_modes"]),
+        "pod_weighting": pod.get("weighting", "unknown"),
         "pod_energy_threshold": float(args.energy_threshold),
         "pod_cumulative_energy_kept": float(
             pod["cumulative_energy"][pod["n_modes"] - 1]
         ),
         "cluster_populations": populations.tolist(),
+        "transition_support_counts": cnm["Q_counts"].tolist(),
+        "transition_time_support": cnm["T_counts"].tolist(),
+        "run_diagnostics": {
+            "n_runs": cnm["n_runs"],
+            "n_complete_runs": cnm["n_complete_runs"],
+            "left_censored": cnm["left_censored"],
+            "right_censored": cnm["right_censored"],
+        },
+        "cycle_diagnostics": {
+            "min_cycle_count": int(args.min_cycle_count),
+            "cycles": cycles,
+        },
         "deterministic_cnm": {
             "occupation_l1_error_vs_data": deterministic_l1_error,
         },
         "cmm_probabilistic": {
+            "model": probabilistic["model"],
+            "time_model": probabilistic["time_model"],
             "n_runs": int(args.n_runs),
             "mean_occupation": probabilistic_occupation.tolist(),
             "occupation_l1_error_vs_data": probabilistic_l1_error,
         },
         "outputs": outputs,
+        "provenance": provenance(args.input),
     }
 
-    with (args.out / "summary.json").open("w", encoding="utf-8") as f:
+    with (args.out / "cnm_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     print("")

@@ -5,3 +5,4 @@ scipy>=1.10
 scikit-learn>=1.2
 pyvista>=0.43
 vtk>=9.2
+pytest>=8
