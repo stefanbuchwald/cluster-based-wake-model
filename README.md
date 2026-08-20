@@ -1,7 +1,11 @@
-# CFD wake reduced-order model
+# Cluster-Based Wake Model
 
-A small research and teaching project for building a cluster-based
-reduced-order model (ROM) of a cylinder wake.
+A compact CFD and reduced-order modelling project for a turbulent
+circular-cylinder wake at $Re_D \approx 3900$.
+
+The project combines an OpenFOAM LES case with a small Python analysis pipeline
+for POD coefficients, cluster-based transition models, CNM network cycles, and
+an independent DMD comparison.
 
 The repository contains source code and configuration only. Simulation fields,
 VTK files, POD matrices, plots, and other generated results are deliberately
@@ -49,10 +53,16 @@ data analysis and its mathematics.
 |   |   |-- dmd_mode_field.py
 |   |   |-- field_pod_from_vtk.py
 |   |   |-- plot_force_coeffs.py
-|   |   |-- run_dmd_analysis.py
-|   |   `-- run_cnm_analysis.py
-|   |-- src/rom/dmd.py
+|   |   |-- plot_release_diagnostics.py
+|   |   |-- run_cnm_analysis.py
+|   |   `-- run_dmd_analysis.py
+|   |-- src/rom/
+|   |   |-- dmd.py
+|   |   |-- pod.py
+|   |   |-- provenance.py
+|   |   `-- transitions.py
 |   `-- requirements.txt
+|-- tests/
 |-- scripts/sweep_cnm_windows.sh
 `-- postprocessing.sh
 ```
@@ -121,6 +131,18 @@ The pressure block can be multiplied by `--p-scale`. This matters because a
 combined velocity-pressure norm otherwise mixes quantities with different
 units and physical meanings.
 
+For OpenFOAM finite-volume field data, the scientifically preferred and default
+POD weighting is `volume`. It uses the discrete inner product
+
+```math
+\langle \boldsymbol{u},\boldsymbol{v}\rangle_h
+=
+\sum_c V_c\,\boldsymbol{u}_c\cdot\boldsymbol{v}_c,
+```
+
+where $V_c$ is the cell volume. This prevents small and large cells from
+contributing as if they represented equal physical volume.
+
 The complete snapshot matrix is stored locally as a memory-mapped `.npy` file.
 It is intentionally ignored by Git because it can be several gigabytes large.
 
@@ -135,12 +157,15 @@ The retained temporal coefficients form the state space for clustering.
 
 The number of retained modes is selected from the requested energy threshold,
 subject to `--n-modes-max`. A hard mode limit can therefore stop before the
-threshold is reached. For OpenFOAM field snapshots, `field_pod_from_vtk.py` uses
-a finite-volume, volume-weighted POD by default. Schema-v2 field-POD NPZ files
-already contain POD coefficients, so `run_cnm_analysis.py` truncates these
-coefficients directly instead of applying a second POD. The current release run
-uses `data/processed/pod_U_volume_t140_270.npz`, which keeps 200 modes and
-retains about 99.71% of the volume-weighted fluctuation energy.
+threshold is reached. The final release run requests `0.9999` POD energy, but
+the stored schema-v2 basis contains 200 modes and about 99.71% of the
+volume-weighted fluctuation energy. Since the requested threshold lies beyond
+the stored basis, `run_cnm_analysis.py` retains all 200 available POD
+coefficients.
+
+Schema-v2 field-POD NPZ files already contain a POD coefficient trajectory.
+They are not automatically subjected to a second POD inside the CNM runner; the
+runner only truncates the existing coefficients if fewer modes are requested.
 
 The reduced states are partitioned with k-means++ using 50 initializations and
 a fixed random seed. Cluster numbers are then reordered for readability: the
@@ -158,6 +183,8 @@ n_{jk}
 \#\left\{i:l_i=k,\ l_{i+1}=j\right\}.
 ```
 
+#### CMM sampled transitions
+
 The sampled transition matrix is
 
 ```math
@@ -170,6 +197,12 @@ Thus, column $k$ contains the probability of the next sampled state, given
 that the current state is $C_k$. Because consecutive samples in the same
 cluster are counted, the diagonal of $P$ measures persistence at the chosen
 sampling interval.
+
+The probabilistic CMM samples from $P_{\cdot k}$. Each sampled step advances the
+trajectory by exactly the original data spacing $\Delta t$; CNM transition times
+$T$ are not additionally applied.
+
+#### CNM direct transitions
 
 For the cluster-based network model, repeated labels are first compressed into
 runs:
@@ -189,14 +222,16 @@ Q_{jk}
 \qquad Q_{kk}=0.
 ```
 
-Columns with no observed departure remain zero.
+Columns with no observed departure remain zero. The direct-transition matrix
+$Q$ removes ordinary self-transitions and describes the next distinct state
+after the current cluster is left. The transition-time matrix $T$ supplies the
+characteristic time for that direct transition.
 
-This distinction is important:
-
-- `P` describes the next sampled label and depends directly on the sampling
-  interval.
-- `Q` describes the next different cluster after the current cluster is left.
-- `T` supplies the characteristic time needed for that direct transition.
+The implementation also reports transition counts. This matters because
+$Q_{jk}=1$ based on one observed transition is much weaker evidence than
+$Q_{jk}=1$ based on 25 repeated transitions. In the final reference run, the
+dominant CNM cycle has a minimum edge support of 25 observed direct
+transitions.
 
 ### Transition times
 
@@ -237,6 +272,10 @@ T_{jk}
 
 Unobserved transitions are stored as `NaN`.
 
+The first observed run is left-censored and the last observed run is
+right-censored. Their incomplete endpoint residence durations are not silently
+treated as fully observed transition-time samples.
+
 ### Deterministic reconstruction
 
 Starting from cluster $k$, the current implementation chooses the most likely
@@ -273,12 +312,49 @@ The displayed cluster label switches from $k$ to $j^\star$ at
 $\alpha=0.5$. If a cluster has no observed successor, the predicted state
 remains at its centroid.
 
-The deterministic reconstruction is retained as a reference. In addition, a
-probabilistic CMM ensemble samples the full column $P_{\cdot k}$, including
-self-transitions. Repeated realizations therefore retain stochastic branching
-and provide a mean trajectory, a standard-deviation band, and an ensemble
-cluster occupation. This is still an empirical in-sample model, not a calibrated
-uncertainty estimate.
+The deterministic reconstruction is retained as a diagnostic reference. It is
+most useful for showing the limitation of collapsing branching network dynamics
+onto one `argmax(Q)` path.
+
+In addition, a probabilistic CMM ensemble samples the full column $P_{\cdot k}$,
+including self-transitions. Repeated realizations therefore retain stochastic
+branching and provide a mean trajectory, a standard-deviation band, and an
+ensemble cluster occupation. This is still an empirical in-sample model, not a
+calibrated uncertainty estimate.
+
+### Network-cycle analysis
+
+Directed cycles are identified automatically from the supported `Q/T` network;
+target frequencies are not provided manually. For a cycle
+
+```math
+k_0 \to k_1 \to \cdots \to k_n \to k_0,
+```
+
+the cycle period is computed from the corresponding transition times:
+
+```math
+T_{\mathrm{cycle}}
+=
+\sum_i T_{k_{i+1},k_i}.
+```
+
+The corresponding Strouhal number is
+
+```math
+St_{\mathrm{cycle}}
+=
+\frac{D}{U_\infty T_{\mathrm{cycle}}}.
+```
+
+For the final reference run, the dominant supported cycle is
+
+```text
+0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 0
+```
+
+with $T_{\mathrm{cycle}}\approx 4.898$, $St_{\mathrm{CNM}}\approx 0.20415$, and
+minimum edge support 25.
 
 ### Visualization
 
@@ -297,9 +373,12 @@ store the spatial POD basis and cell-center coordinates, allowing a selected
 DMD mode to be projected back to the physical velocity or pressure field.
 
 Discrete eigenvalues are converted to continuous growth rates and Strouhal
-numbers. The runner reports independently ranked positive-frequency DMD
-candidates; the release diagnostic plot then compares these candidates with
-cycle frequencies measured from the supported CNM `Q/T` network.
+numbers. The workflow is POD trajectory $\to$ DMD $\to$ independent oscillatory
+candidates $\to$ comparison with CNM cycles. The final reference run gives a
+strong independently identified DMD candidate at $St_{\mathrm{DMD}}\approx
+0.20540$ with amplitude rank 2 and growth rate approximately $-0.00663$. The
+dominant CNM cycle at $St\approx0.204$ is therefore a close independent
+consistency check; the frequency difference is about 0.62%.
 
 ## Running the analysis
 
@@ -480,9 +559,9 @@ with quantified uncertainty.
 - **Finite transition statistics.** Entries of `Q` and `T` are empirical
   estimates. Rare transitions may be based on very few observations, and a
   cluster with no observed departure becomes an absorbing state in the
-  deterministic reconstruction. The corrected output reports direct transition
-  counts so strong-looking probabilities can be interpreted with their sample
-  support.
+  deterministic reconstruction. Transition counts are reported explicitly, but
+  confidence intervals for transition probabilities and transition times are
+  not currently estimated.
 - **State representation matters.** A model built from $C_D$, $C_L$, and $C_M$
   describes force dynamics, but distinct flow fields can share similar force
   coefficients. Field-based POD contains more spatial information, while its
@@ -503,8 +582,8 @@ with quantified uncertainty.
 Accordingly, the current results should be interpreted as a compact,
 data-driven description of recurrent wake states and their observed
 transitions. A predictive assessment would require separate training and test
-windows, transition-count diagnostics, and comparison against withheld CFD
-data.
+windows, uncertainty estimates for transition statistics, and comparison against
+withheld CFD data.
 
 ## Keeping Git small
 
