@@ -426,21 +426,135 @@ def deterministic_cnm_prediction(
         if not np.isfinite(duration) or duration <= 0:
             duration = fallback_T
 
-        t_arrive = t_depart + float(duration)
-
-        while idx < len(time) and time[idx] <= t_arrive:
-            alpha = (time[idx] - t_depart) / max(float(duration), 1e-12)
-            alpha = float(np.clip(alpha, 0.0, 1.0))
-
-            pred_labels[idx] = current if alpha < 0.5 else nxt
-            pred_A[idx, :] = (1.0 - alpha) * centers[current] + alpha * centers[nxt]
-
-            idx += 1
+        idx = _interpolate_transition(
+            time=time,
+            centers=centers,
+            pred_labels=pred_labels,
+            pred_A=pred_A,
+            start_idx=idx,
+            t_depart=t_depart,
+            duration=float(duration),
+            current=current,
+            nxt=nxt,
+        )
 
         current = nxt
-        t_depart = t_arrive
+        t_depart += float(duration)
 
     return pred_labels, pred_A
+
+
+def _interpolate_transition(
+    time: np.ndarray,
+    centers: np.ndarray,
+    pred_labels: np.ndarray,
+    pred_A: np.ndarray,
+    start_idx: int,
+    t_depart: float,
+    duration: float,
+    current: int,
+    nxt: int,
+) -> int:
+    """Fill one centroid-to-centroid transition and return the next index."""
+    idx = int(start_idx)
+    t_arrive = float(t_depart + duration)
+
+    while idx < len(time) and time[idx] <= t_arrive:
+        alpha = (time[idx] - t_depart) / max(duration, 1e-12)
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        pred_labels[idx] = current if alpha < 0.5 else nxt
+        pred_A[idx, :] = (
+            (1.0 - alpha) * centers[current] + alpha * centers[nxt]
+        )
+        idx += 1
+
+    return idx
+
+
+def probabilistic_cmm_prediction(
+    time: np.ndarray,
+    centers: np.ndarray,
+    P: np.ndarray,
+    T: np.ndarray,
+    start_cluster: int,
+    n_runs: int,
+    rng: np.random.Generator,
+) -> dict:
+    """Sample CMM trajectories from the full transition matrix ``P``."""
+    time = np.asarray(time, dtype=float)
+    centers = np.asarray(centers, dtype=float)
+    P = np.asarray(P, dtype=float)
+    T = np.asarray(T, dtype=float)
+
+    if n_runs < 1:
+        raise ValueError("n_runs must be at least 1")
+    if len(time) == 0:
+        raise ValueError("time must not be empty")
+
+    K, n_features = centers.shape
+    if P.shape != (K, K) or T.shape != (K, K):
+        raise ValueError("P and T must both have shape (K, K)")
+
+    dt_default = float(np.median(np.diff(time))) if len(time) >= 2 else 1.0
+    positive_T = T[np.isfinite(T) & (T > 0)]
+    fallback_T = float(np.median(positive_T)) if positive_T.size else dt_default
+
+    pred_labels_runs = np.empty((n_runs, len(time)), dtype=int)
+    pred_A_runs = np.empty((n_runs, len(time), n_features), dtype=float)
+
+    for run in range(n_runs):
+        labels = pred_labels_runs[run]
+        coefficients = pred_A_runs[run]
+        current = int(start_cluster)
+        idx = 0
+
+        while idx < len(time):
+            probabilities = np.asarray(P[:, current], dtype=float).copy()
+            probabilities[~np.isfinite(probabilities)] = 0.0
+            probabilities = np.clip(probabilities, 0.0, None)
+            probability_sum = float(probabilities.sum())
+
+            if probability_sum <= 0:
+                nxt = current
+            else:
+                probabilities /= probability_sum
+                nxt = int(rng.choice(K, p=probabilities))
+
+            if nxt == current:
+                labels[idx] = current
+                coefficients[idx, :] = centers[current]
+                idx += 1
+                continue
+
+            duration = float(T[nxt, current])
+            if not np.isfinite(duration) or duration <= 0:
+                duration = fallback_T
+
+            idx = _interpolate_transition(
+                time=time,
+                centers=centers,
+                pred_labels=labels,
+                pred_A=coefficients,
+                start_idx=idx,
+                t_depart=float(time[idx]),
+                duration=duration,
+                current=current,
+                nxt=nxt,
+            )
+            current = nxt
+
+    mean_occupation = np.bincount(
+        pred_labels_runs.reshape(-1),
+        minlength=K,
+    ) / pred_labels_runs.size
+
+    return {
+        "pred_labels_runs": pred_labels_runs,
+        "pred_A_runs": pred_A_runs,
+        "pred_labels_mean_occupation": mean_occupation,
+        "pred_A_mean": pred_A_runs.mean(axis=0),
+        "pred_A_std": pred_A_runs.std(axis=0),
+    }
 
 
 def mds_embedding(A: np.ndarray, centers: np.ndarray, random_state: int) -> tuple[np.ndarray, np.ndarray]:
@@ -593,6 +707,104 @@ def save_population_plot(
     plt.close()
 
 
+def save_probabilistic_population_plot(
+    labels: np.ndarray,
+    deterministic_labels: np.ndarray | None,
+    probabilistic_occupation: np.ndarray,
+    K: int,
+    out: Path,
+) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    data_occupation = np.bincount(labels, minlength=K) / len(labels)
+    x = np.arange(K)
+    width = 0.26
+
+    plt.figure(figsize=(10, 4.8))
+    plt.bar(x - width, data_occupation, width=width, label="Data")
+
+    if deterministic_labels is not None:
+        deterministic_occupation = (
+            np.bincount(deterministic_labels, minlength=K)
+            / len(deterministic_labels)
+        )
+        plt.bar(
+            x,
+            deterministic_occupation,
+            width=width,
+            label="CNM deterministic",
+        )
+
+    probabilistic_x = x + width if deterministic_labels is not None else x
+    plt.bar(
+        probabilistic_x,
+        probabilistic_occupation,
+        width=width,
+        label="CMM probabilistic",
+    )
+    plt.xlabel("Cluster")
+    plt.ylabel("Probability")
+    plt.title("Cluster occupation comparison")
+    plt.grid(True, axis="y", alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out, dpi=200)
+    plt.close()
+
+
+def save_probabilistic_coefficients_plot(
+    time: np.ndarray,
+    A: np.ndarray,
+    deterministic_A: np.ndarray | None,
+    probabilistic_mean: np.ndarray,
+    probabilistic_std: np.ndarray,
+    out: Path,
+    n: int = 4,
+) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    n = min(n, A.shape[1])
+    plt.figure(figsize=(12, 2.7 * n))
+
+    for i in range(n):
+        ax = plt.subplot(n, 1, i + 1)
+        ax.plot(time, A[:, i], linewidth=1.1, label=f"Data a{i + 1}")
+
+        if deterministic_A is not None:
+            ax.plot(
+                time,
+                deterministic_A[:, i],
+                linewidth=1.1,
+                linestyle="--",
+                label=f"CNM deterministic a{i + 1}",
+            )
+
+        lower = probabilistic_mean[:, i] - probabilistic_std[:, i]
+        upper = probabilistic_mean[:, i] + probabilistic_std[:, i]
+        ax.plot(
+            time,
+            probabilistic_mean[:, i],
+            linewidth=1.2,
+            color="tab:green",
+            label=f"CMM mean a{i + 1}",
+        )
+        ax.fill_between(
+            time,
+            lower,
+            upper,
+            color="tab:green",
+            alpha=0.2,
+            label="CMM mean +/- std",
+        )
+        ax.set_ylabel(f"a{i + 1}")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best")
+
+    plt.xlabel("Time")
+    plt.suptitle("Deterministic and probabilistic coefficient predictions", y=0.995)
+    plt.tight_layout()
+    plt.savefig(out, dpi=200)
+    plt.close()
+
+
 def save_mds_plot(
     emb_A: np.ndarray,
     emb_C: np.ndarray,
@@ -684,6 +896,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--energy-threshold", type=float, default=0.9999)
     parser.add_argument("--n-modes-max", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=1)
+    parser.add_argument("--n-runs", type=int, default=200)
 
     parser.add_argument("--t-min", type=float, default=None)
     parser.add_argument("--t-max", type=float, default=None)
@@ -837,6 +1050,45 @@ def main() -> None:
             start_cluster=int(labels[0]),
         )
 
+    probabilistic = probabilistic_cmm_prediction(
+        time=time,
+        centers=centers,
+        P=cnm["P"],
+        T=cnm["T"],
+        start_cluster=int(labels[0]),
+        n_runs=args.n_runs,
+        rng=np.random.default_rng(args.random_state),
+    )
+
+    data_occupation = np.bincount(labels, minlength=args.K) / len(labels)
+    probabilistic_occupation = probabilistic[
+        "pred_labels_mean_occupation"
+    ]
+    probabilistic_l1_error = float(
+        np.sum(np.abs(data_occupation - probabilistic_occupation))
+    )
+
+    if pred_labels is None:
+        deterministic_l1_error = None
+    else:
+        deterministic_occupation = (
+            np.bincount(pred_labels, minlength=args.K) / len(pred_labels)
+        )
+        deterministic_l1_error = float(
+            np.sum(np.abs(data_occupation - deterministic_occupation))
+        )
+
+    print("")
+    print("Cluster occupation L1 error vs data:")
+    if deterministic_l1_error is None:
+        print("  Deterministic CNM:     skipped")
+    else:
+        print(f"  Deterministic CNM:     {deterministic_l1_error:.6f}")
+    print(
+        f"  Probabilistic CMM:     {probabilistic_l1_error:.6f} "
+        f"(n_runs={args.n_runs})"
+    )
+
     emb_A, emb_C = mds_embedding(
         A=A,
         centers=centers,
@@ -858,6 +1110,19 @@ def main() -> None:
 
     if pred_A is not None:
         np.save(args.out / "cnm_pred_coefficients.npy", pred_A)
+
+    np.save(
+        args.out / "cmm_probabilistic_labels_runs.npy",
+        probabilistic["pred_labels_runs"],
+    )
+    np.save(
+        args.out / "cmm_probabilistic_coefficients_mean.npy",
+        probabilistic["pred_A_mean"],
+    )
+    np.save(
+        args.out / "cmm_probabilistic_coefficients_std.npy",
+        probabilistic["pred_A_std"],
+    )
 
     # Save figures
     save_energy_plot(
@@ -917,6 +1182,41 @@ def main() -> None:
         out=args.out / "08_cluster_probabilities.png",
     )
 
+    save_probabilistic_population_plot(
+        labels=labels,
+        deterministic_labels=pred_labels,
+        probabilistic_occupation=probabilistic_occupation,
+        K=args.K,
+        out=args.out / "12_cluster_probabilities_probabilistic.png",
+    )
+
+    save_probabilistic_coefficients_plot(
+        time=time,
+        A=A,
+        deterministic_A=pred_A,
+        probabilistic_mean=probabilistic["pred_A_mean"],
+        probabilistic_std=probabilistic["pred_A_std"],
+        out=args.out / "13_coefficients_probabilistic.png",
+        n=4,
+    )
+
+    outputs = {
+        "energy": "01_pod_energy.png",
+        "mds": "02_mds_clusters.png",
+        "P": "03_P_matrix.png",
+        "Q": "04_Q_matrix.png",
+        "T": "05_T_matrix.png",
+        "affiliation": "06_cluster_affiliation.png",
+        "coefficients": "07_first_coefficients.png",
+        "probabilities": "08_cluster_probabilities.png",
+        "probabilistic_probabilities": (
+            "12_cluster_probabilities_probabilistic.png"
+        ),
+        "probabilistic_coefficients": "13_coefficients_probabilistic.png",
+    }
+    if args.input_type == "force":
+        outputs = {"force_coefficients": "00_force_coefficients.png", **outputs}
+
     summary = {
         "input": str(args.input),
         "input_type": args.input_type,
@@ -933,17 +1233,15 @@ def main() -> None:
             pod["cumulative_energy"][pod["n_modes"] - 1]
         ),
         "cluster_populations": populations.tolist(),
-        "outputs": {
-            "force_coefficients": "00_force_coefficients.png",
-            "energy": "01_pod_energy.png",
-            "mds": "02_mds_clusters.png",
-            "P": "03_P_matrix.png",
-            "Q": "04_Q_matrix.png",
-            "T": "05_T_matrix.png",
-            "affiliation": "06_cluster_affiliation.png",
-            "coefficients": "07_first_coefficients.png",
-            "probabilities": "08_cluster_probabilities.png",
+        "deterministic_cnm": {
+            "occupation_l1_error_vs_data": deterministic_l1_error,
         },
+        "cmm_probabilistic": {
+            "n_runs": int(args.n_runs),
+            "mean_occupation": probabilistic_occupation.tolist(),
+            "occupation_l1_error_vs_data": probabilistic_l1_error,
+        },
+        "outputs": outputs,
     }
 
     with (args.out / "summary.json").open("w", encoding="utf-8") as f:

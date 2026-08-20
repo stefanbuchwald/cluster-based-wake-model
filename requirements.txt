@@ -3,3 +3,5 @@ pandas>=1.5
 matplotlib>=3.6
 scipy>=1.10
 scikit-learn>=1.2
+pyvista>=0.43
+vtk>=9.2

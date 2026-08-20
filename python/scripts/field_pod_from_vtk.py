@@ -8,9 +8,9 @@ U only:
     python python/scripts/field_pod_from_vtk.py \
         --vtk-glob "openfoam/cases/cylinderLES3D/VTK/cylinderLES3D_*.vtk" \
         --fields U \
-        --out data/processed/pod_U_t60_140.npz \
-        --time-start 60 \
-        --time-step 0.5 \
+        --out data/processed/pod_U_t140_270.npz \
+        --time-start 140 \
+        --time-step 0.25 \
         --energy-threshold 0.9999 \
         --n-modes-max 30 \
         --cell-stride 1
@@ -19,9 +19,9 @@ U and p:
     python python/scripts/field_pod_from_vtk.py \
         --vtk-glob "openfoam/cases/cylinderLES3D/VTK/cylinderLES3D_*.vtk" \
         --fields U p \
-        --out data/processed/pod_U_p_t60_140.npz \
-        --time-start 60 \
-        --time-step 0.5 \
+        --out data/processed/pod_U_p_t140_270.npz \
+        --time-start 140 \
+        --time-step 0.25 \
         --energy-threshold 0.9999 \
         --n-modes-max 30 \
         --cell-stride 1
@@ -95,6 +95,54 @@ def load_vtk_snapshot(
     return np.concatenate(parts).astype(dtype, copy=False)
 
 
+def inspect_vtk_layout(
+    path: Path,
+    fields: list[str],
+    cell_stride: int,
+) -> tuple[np.ndarray, dict]:
+    """Return sampled cell centers and the flattened feature layout."""
+    try:
+        import pyvista as pv
+    except ImportError as exc:
+        raise ImportError(
+            "pyvista is required. Install with: pip install pyvista vtk"
+        ) from exc
+
+    mesh = pv.read(str(path))
+    coordinates = np.asarray(mesh.cell_centers().points)[::cell_stride]
+    field_entries = []
+    feature_start = 0
+
+    for field in fields:
+        if field not in mesh.cell_data:
+            raise KeyError(
+                f"Missing field {field!r} in {path}. "
+                f"Available cell arrays: {list(mesh.cell_data.keys())}"
+            )
+
+        array = np.asarray(mesh.cell_data[field])
+        n_components = 1 if array.ndim == 1 else int(array.shape[1])
+        feature_count = len(coordinates) * n_components
+        field_entries.append(
+            {
+                "name": field,
+                "n_components": n_components,
+                "feature_start": feature_start,
+                "feature_stop": feature_start + feature_count,
+            }
+        )
+        feature_start += feature_count
+
+    layout = {
+        "n_cells": int(len(coordinates)),
+        "coordinate_dimension": int(coordinates.shape[1]),
+        "fields": field_entries,
+        "n_features": int(feature_start),
+        "flattening": "field-major, then cell-major, then component",
+    }
+    return coordinates, layout
+
+
 def compute_times(
     n: int,
     time_start: float | None,
@@ -114,10 +162,11 @@ def method_of_snapshots_pod(
     chunk_features: int,
     energy_threshold: float,
     n_modes_max: int | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
     """
     Returns:
-        coefficients, singular_values, energy, cumulative_energy, n_modes
+        coefficients, singular_values, energy, cumulative_energy, n_modes,
+        spatial_modes
     """
 
     X = np.load(matrix_path, mmap_mode="r")
@@ -170,14 +219,45 @@ def method_of_snapshots_pod(
     if n_modes_max is not None:
         n_modes = min(n_modes, int(n_modes_max))
 
-    n_modes = max(1, min(n_modes, n_samples))
-
     singular_values = np.sqrt(evals * max(n_samples - 1, 1))
+    singular_tolerance = (
+        np.finfo(np.float64).eps
+        * max(n_samples, n_features)
+        * singular_values[0]
+    )
+    numerical_rank = int(np.count_nonzero(singular_values > singular_tolerance))
+    if numerical_rank == 0:
+        raise ValueError("Snapshot matrix has zero numerical POD rank.")
+
+    n_modes = max(1, min(n_modes, numerical_rank))
 
     # Temporal POD coefficients: a_i(t) = sqrt(lambda_i*(N-1)) * temporal_mode_i(t)
     coefficients = evecs[:, :n_modes] * singular_values[:n_modes]
 
-    return coefficients, singular_values, energy, cumulative_energy, n_modes
+    print("")
+    print("==> Reconstructing spatial POD modes")
+
+    spatial_modes = np.empty((n_features, n_modes), dtype=dtype)
+    retained_evecs = evecs[:, :n_modes]
+    retained_singular_values = singular_values[:n_modes]
+
+    for j0 in range(0, n_features, chunk_features):
+        j1 = min(j0 + chunk_features, n_features)
+        block = np.asarray(X[:, j0:j1], dtype=np.float64)
+        block -= mean[j0:j1]
+        mode_block = block.T @ retained_evecs
+        mode_block /= retained_singular_values[None, :]
+        spatial_modes[j0:j1, :] = mode_block.astype(dtype, copy=False)
+        print(f"    spatial mode block {j0}:{j1}")
+
+    return (
+        coefficients,
+        singular_values,
+        energy,
+        cumulative_energy,
+        n_modes,
+        spatial_modes,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -266,6 +346,17 @@ def main() -> None:
 
     n_samples = len(files)
     n_features = len(first_vec)
+    coordinates, field_layout = inspect_vtk_layout(
+        path=files[0],
+        fields=args.fields,
+        cell_stride=args.cell_stride,
+    )
+
+    if field_layout["n_features"] != n_features:
+        raise ValueError(
+            "Field layout does not match flattened snapshot size: "
+            f"{field_layout['n_features']} != {n_features}"
+        )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -314,7 +405,14 @@ def main() -> None:
         time_step=args.time_step,
     )
 
-    coefficients, singular_values, energy, cumulative_energy, n_modes = method_of_snapshots_pod(
+    (
+        coefficients,
+        singular_values,
+        energy,
+        cumulative_energy,
+        n_modes,
+        spatial_modes,
+    ) = method_of_snapshots_pod(
         matrix_path=matrix_path,
         n_samples=n_samples,
         n_features=n_features,
@@ -340,6 +438,7 @@ def main() -> None:
         )
 
     meta = {
+        "schema_version": 2,
         "vtk_glob": args.vtk_glob,
         "n_files": len(files),
         "first_file": str(files[0]),
@@ -354,6 +453,7 @@ def main() -> None:
         "n_modes_max": args.n_modes_max,
         "n_modes": int(n_modes),
         "snapshot_matrix": str(matrix_path),
+        "field_layout": field_layout,
     }
 
     np.savez_compressed(
@@ -365,6 +465,9 @@ def main() -> None:
         energy=energy,
         cumulative_energy=cumulative_energy,
         n_modes=np.array([n_modes]),
+        spatial_modes=spatial_modes,
+        coordinates=coordinates,
+        field_shape=np.array(json.dumps(field_layout)),
         fields=np.array(args.fields),
         vtk_files=np.array([str(f) for f in files]),
         meta_json=json.dumps(meta, indent=2),
@@ -381,6 +484,9 @@ def main() -> None:
     print("    energy")
     print("    cumulative_energy")
     print("    singular_values")
+    print("    spatial_modes")
+    print("    coordinates")
+    print("    field_shape")
 
 
 if __name__ == "__main__":

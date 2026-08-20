@@ -10,10 +10,16 @@ excluded from Git.
 The workflow is:
 
 ```text
-OpenFOAM snapshots or force coefficients
+OpenFOAM LES, t = 0 ... 300
                   |
                   v
-        centering and POD/SVD
+force coefficients and field snapshots
+                  |
+                  v
+analysis window, t = 140 ... 270
+                  |
+                  v
+        POD/SVD of velocity snapshots
                   |
                   v
            k-means++ clusters
@@ -22,7 +28,7 @@ OpenFOAM snapshots or force coefficients
      transition matrices P, Q, and T
                   |
                   v
-       deterministic CNM trajectory
+ CNM cycles, probabilistic CMM, and DMD comparison
 ```
 
 The OpenFOAM case is documented separately in
@@ -36,11 +42,16 @@ data analysis and its mathematics.
 |-- openfoam/
 |   |-- README.md
 |   `-- cases/cylinderLES3D/
+|       |-- export_lambda2_pvd.py
+|       `-- lambda2_stats.py
 |-- python/
 |   |-- scripts/
+|   |   |-- dmd_mode_field.py
 |   |   |-- field_pod_from_vtk.py
 |   |   |-- plot_force_coeffs.py
+|   |   |-- run_dmd_analysis.py
 |   |   `-- run_cnm_analysis.py
+|   |-- src/rom/dmd.py
 |   `-- requirements.txt
 |-- scripts/sweep_cnm_windows.sh
 `-- postprocessing.sh
@@ -124,8 +135,10 @@ The retained temporal coefficients form the state space for clustering.
 
 The number of retained modes is selected from the requested energy threshold,
 subject to `--n-modes-max`. A hard mode limit can therefore stop before the
-threshold is reached. For example, the existing 161-snapshot velocity-field
-run retained about 89.27% of the fluctuation energy in its first 30 modes.
+threshold is reached. The final field-based analysis uses
+`data/processed/pod_U_t140_270.npz`, whose 200 stored POD coefficients contain
+essentially all retained snapshot energy; re-projecting these coefficients in
+`run_cnm_analysis.py` keeps 131 modes for the `0.9999` energy threshold.
 
 The reduced states are partitioned with k-means++ using 50 initializations and
 a fixed random seed. Cluster numbers are then reordered for readability: the
@@ -258,15 +271,33 @@ The displayed cluster label switches from $k$ to $j^\star$ at
 $\alpha=0.5$. If a cluster has no observed successor, the predicted state
 remains at its centroid.
 
-This reconstruction is deterministic. It does not sample from $Q$ and
-therefore cannot reproduce stochastic branching or provide uncertainty
-estimates.
+The deterministic reconstruction is retained as a reference. In addition, a
+probabilistic CMM ensemble samples the full column $P_{\cdot k}$, including
+self-transitions. Repeated realizations therefore retain stochastic branching
+and provide a mean trajectory, a standard-deviation band, and an ensemble
+cluster occupation. This is still an empirical in-sample model, not a calibrated
+uncertainty estimate.
 
 ### Visualization
 
 Multidimensional scaling embeds snapshots and centroids into three dimensions
 for the cluster map. It is only a visualization step and does not affect the
 clustering, transition matrices, or reconstruction.
+
+### DMD comparison
+
+The optional DMD runner applies exact Dynamic Mode Decomposition to the matrix
+stored as `X` in the NPZ file. For files produced by
+`field_pod_from_vtk.py`, this matrix contains retained temporal POD
+coefficients, not the full spatial snapshot matrix. The resulting DMD modes
+first describe dynamics in POD-coordinate space. Schema-v2 field POD files also
+store the spatial POD basis and cell-center coordinates, allowing a selected
+DMD mode to be projected back to the physical velocity or pressure field.
+
+Discrete eigenvalues are converted to continuous growth rates and Strouhal
+numbers. The runner compares the DMD frequencies nearest to the two CNM cycle
+frequencies, while separately reporting the modes with the largest fitted
+amplitudes.
 
 ## Running the analysis
 
@@ -276,28 +307,32 @@ From force coefficients:
 python python/scripts/run_cnm_analysis.py \
     --input-type force \
     --input openfoam/cases/cylinderLES3D/postProcessing/forceCoeffs/0/forceCoeffs.dat \
-    --out data/figures/cnm_force_K10 \
+    --out data/figures/cnm_force_K10_t140_270 \
     --K 10 \
-    --t-min 60
+    --t-min 140 \
+    --t-max 270
 ```
 
-From field POD coefficients:
+From field POD coefficients, first export or keep VTK snapshots only for the
+analysis window `t=140...270`; otherwise the glob will include the full local
+VTK series:
 
 ```bash
 python python/scripts/field_pod_from_vtk.py \
     --vtk-glob "openfoam/cases/cylinderLES3D/VTK/cylinderLES3D_*.vtk" \
     --fields U \
-    --out data/processed/pod_U_t60_140.npz \
-    --time-start 60 \
-    --time-step 0.5 \
+    --out data/processed/pod_U_t140_270.npz \
+    --time-start 140 \
+    --time-step 0.25 \
     --energy-threshold 0.9999 \
-    --n-modes-max 30
+    --n-modes-max 200
 
 python python/scripts/run_cnm_analysis.py \
     --input-type npz \
-    --input data/processed/pod_U_t60_140.npz \
+    --input data/processed/pod_U_t140_270.npz \
     --out data/figures/cnm_field_K10 \
-    --K 10
+    --K 10 \
+    --n-runs 200
 ```
 
 For a sweep over time windows and cluster counts:
@@ -305,6 +340,94 @@ For a sweep over time windows and cluster counts:
 ```bash
 K_LIST="6 8 10 12" STRIDE=10 ./scripts/sweep_cnm_windows.sh
 ```
+
+For an exact-DMD comparison using the field POD coefficients:
+
+```bash
+python python/scripts/run_dmd_analysis.py \
+    --input data/processed/pod_U_t140_270.npz \
+    --out data/figures/dmd_U_t140_270 \
+    --dt 0.25
+
+python python/scripts/dmd_mode_field.py \
+    --npz data/processed/pod_U_t140_270.npz \
+    --dmd-summary data/figures/dmd_U_t140_270/summary.json \
+    --dmd-dir data/figures/dmd_U_t140_270 \
+    --mode-st 0.203 \
+    --component x \
+    --z-slice 2.0 \
+    --out data/figures/dmd_U_t140_270/14_dmd_mode_field_St0203.png
+```
+
+The spatial plot requires a schema-v2 NPZ produced by the current
+`field_pod_from_vtk.py`. Older NPZ files remain usable for CNM and
+coefficient-space DMD, but must be regenerated once for physical DMD mode
+plots.
+
+For an interactive three-dimensional view, open the OpenFOAM case directly in
+ParaView:
+
+```bash
+paraview openfoam/cases/cylinderLES3D/cylinderLES3D.foam
+```
+
+Select `Lambda2` and `U` in the OpenFOAM reader and create a contour at
+$\lambda_2=-0.25$. Camera, lighting, coloring, and screenshot composition can
+then be adjusted interactively. Data generation and the exact GUI steps are
+documented in [`openfoam/README.md`](openfoam/README.md).
+
+### Reproducing the final analysis
+
+The final result discussed in the project overview uses the completed
+OpenFOAM run from `t=0` to `t=300` and applies the ROM analysis to the
+developed interval `t=140` to `t=270`:
+
+```bash
+source .venv/bin/activate
+export MPLCONFIGDIR=/tmp/matplotlib
+
+OUT="data/figures/final_t140_270_K10_rerun"
+NPZ="data/processed/pod_U_t140_270.npz"
+FORCE="data/processed/forceCoeffs_merged_t0_300.dat"
+
+mkdir -p "$OUT"
+
+python python/scripts/plot_force_coeffs.py \
+    --file "$FORCE" \
+    --out "$OUT/00_force_coefficients_t0_300.png" \
+    --t-min 0 \
+    --t-max 300
+
+python python/scripts/run_cnm_analysis.py \
+    --input-type npz \
+    --input "$NPZ" \
+    --out "$OUT" \
+    --K 10 \
+    --n-runs 200 \
+    --random-state 1
+
+mv "$OUT/summary.json" "$OUT/cnm_summary.json"
+
+python python/scripts/run_dmd_analysis.py \
+    --input "$NPZ" \
+    --out "$OUT" \
+    --dt 0.25
+
+mv "$OUT/summary.json" "$OUT/dmd_summary.json"
+
+python python/scripts/dmd_mode_field.py \
+    --npz "$NPZ" \
+    --dmd-summary "$OUT/dmd_summary.json" \
+    --dmd-dir "$OUT" \
+    --mode-st 0.203 \
+    --component x \
+    --z-slice 2.0 \
+    --out "$OUT/14_dmd_mode_field_St0203.png"
+```
+
+This reproduces the current reference folder without requiring fresh VTK
+exports, as long as `pod_U_t140_270.npz` is still present locally. The NPZ file
+is a generated artifact and is intentionally not committed.
 
 ## Outputs
 
@@ -320,6 +443,12 @@ Each run writes a local result directory containing:
 | `06_cluster_affiliation.png` | data and predicted cluster labels |
 | `07_first_coefficients.png` | leading coefficients and reconstruction |
 | `08_cluster_probabilities.png` | measured and predicted occupations |
+| `09_dmd_eigenvalues.png` | discrete DMD eigenvalues and unit circle |
+| `10_dmd_spectrum.png` | DMD amplitudes over Strouhal number |
+| `11_dmd_mode_reconstruction.png` | leading coefficients and DMD reconstruction |
+| `12_cluster_probabilities_probabilistic.png` | data, deterministic CNM, and probabilistic CMM occupations |
+| `13_coefficients_probabilistic.png` | deterministic reconstruction and probabilistic ensemble band |
+| `14_dmd_mode_field_St0203.png` | selected DMD mode projected to a physical field slice |
 | `summary.json` | run parameters and basic statistics |
 | `*.npy` | numeric intermediate results |
 
@@ -349,10 +478,16 @@ with quantified uncertainty.
   coefficients. Field-based POD contains more spatial information, while its
   result depends on the retained modes and on any scaling between velocity and
   pressure.
-- **Deterministic centroid dynamics.** The reconstruction always follows
-  `argmax(Q)` and interpolates linearly between cluster centroids. It therefore
-  suppresses less likely branches and does not reproduce within-cluster
-  fluctuations, turbulent variability, or uncertainty.
+- **Centroid dynamics.** The deterministic reference follows `argmax(Q)`.
+  The probabilistic CMM samples branches from $P$, but both models interpolate
+  between fixed cluster centroids. They do not reproduce within-cluster
+  turbulent fluctuations. The ensemble spread represents transition sampling,
+  not complete physical or statistical uncertainty.
+- **Single-operator DMD.** Exact DMD fits one autonomous linear operator over
+  the complete analysis window. A trajectory whose oscillation envelope first
+  grows and later decays is therefore not expected to be reconstructed
+  accurately by one set of exponential modes. DMD amplitudes are fitted to the
+  first snapshot rather than optimized over the complete time interval.
 
 Accordingly, the current results should be interpreted as a compact,
 data-driven description of recurrent wake states and their observed
@@ -379,3 +514,6 @@ Li, H., Fernex, D., Semaan, R., Tan, J., Morzynski, M., and Noack, B. R.
 
 Taira, K. et al. (2017). Modal analysis of fluid flows: An overview.
 *AIAA Journal*, 55(12).
+
+Tu, J. H. et al. (2014). On dynamic mode decomposition: Theory and
+applications. *Journal of Computational Dynamics*, 1(2), 391-421.

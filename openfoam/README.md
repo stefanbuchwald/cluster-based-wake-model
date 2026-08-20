@@ -144,8 +144,8 @@ The active configuration is in `cases/cylinderLES3D/system/`.
 | adaptive time step | yes |
 | maximum Courant number | 0.75 |
 | maximum time step | 0.01 |
-| write interval | 0.5 |
-| end time | 140 |
+| write interval | 0.25 |
+| end time | 300 |
 
 The initial `deltaT` is `0.0005`; afterwards OpenFOAM adapts it subject to the
 Courant limit.
@@ -224,7 +224,7 @@ because they change committed case configuration files.
 From the project root:
 
 ```bash
-./postprocessing.sh --t-min 60 --K 10
+./postprocessing.sh --t-min 140 --t-max 270 --K 10 --tag final_t140_270
 ```
 
 This can reconstruct parallel results, export `U` and `p` to VTK, merge force
@@ -233,9 +233,73 @@ coefficient files, and run the Python CNM analysis.
 Useful switches include:
 
 ```bash
-./postprocessing.sh --no-reconstruct --no-vtk --t-min 60 --K 10
+./postprocessing.sh --no-reconstruct --no-vtk --t-min 140 --t-max 270 --K 10
 ./postprocessing.sh --vtk-latest
-./postprocessing.sh --vtk-time 60:140
+./postprocessing.sh --vtk-time 140:270
+```
+
+### Lambda2 vortex structures
+
+The Lambda2 criterion identifies vortex cores from the second eigenvalue of
+
+```math
+\mathbf S^2+\boldsymbol{\Omega}^2,
+```
+
+where $\mathbf S$ and $\boldsymbol{\Omega}$ are the symmetric and
+antisymmetric parts of the velocity-gradient tensor. Connected regions with
+$\lambda_2<0$ indicate rotation-dominated flow structures.
+
+The case may contain local `Lambda2` fields in generated time directories.
+They are ignored by Git. To regenerate them from the velocity field for the
+developed interval:
+
+```bash
+cd openfoam/cases/cylinderLES3D
+
+postProcess -func Lambda2 -time '140:270'
+touch cylinderLES3D.foam
+```
+
+Open the case directly:
+
+```bash
+paraview cylinderLES3D.foam
+```
+
+In ParaView:
+
+1. Select `internalMesh`, `U`, and `Lambda2` in the OpenFOAM reader and click
+   **Apply**.
+2. Move to a developed time, for example `t = 200`.
+3. Add **Cell Data to Point Data** if `Lambda2` is available only as cell data.
+4. Add a **Contour**, select `Lambda2`, and start with an isovalue of `-0.25`.
+5. Color the surface by `U` using **Magnitude**, then adjust camera, lighting,
+   background, and material interactively.
+6. Save the final view with **File > Save Screenshot**.
+
+For this case, `-0.25` retains the alternating wake structures over a
+substantial downstream distance. More negative thresholds such as `-0.5` or
+`-1.0` isolate progressively stronger and more compact vortex cores.
+
+The available value range can be checked before opening ParaView:
+
+```bash
+pvpython lambda2_stats.py cylinderLES3D.foam
+pvpython lambda2_stats.py cylinderLES3D.foam --per-time
+```
+
+ParaView can read the `.foam` time series directly. A VTU/PVD export is only
+needed when the visualization data should be portable without the OpenFOAM
+case:
+
+```bash
+pvpython export_lambda2_pvd.py \
+    cylinderLES3D.foam \
+    lambda2_series \
+    5 \
+    --binary \
+    --stats
 ```
 
 For direct visualization:
@@ -283,5 +347,7 @@ openfoam/
     |-- Allclean
     |-- Allkill
     |-- Allview
-    `-- calcRe.py
+    |-- calcRe.py
+    |-- export_lambda2_pvd.py
+    `-- lambda2_stats.py
 ```
