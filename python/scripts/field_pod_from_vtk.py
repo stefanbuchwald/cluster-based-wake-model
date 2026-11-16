@@ -237,7 +237,7 @@ def method_of_snapshots_pod(
 
     for j0 in range(0, n_features, chunk_features):
         j1 = min(j0 + chunk_features, n_features)
-        block = np.asarray(X[:, j0:j1], dtype=np.float64)
+        block = np.array(X[:, j0:j1], dtype=np.float64, copy=True)
         block -= mean[j0:j1]
         C += (block * weights[j0:j1][None, :]) @ block.T
         print(f"    covariance block {j0}:{j1}")
@@ -291,7 +291,7 @@ def method_of_snapshots_pod(
 
     for j0 in range(0, n_features, chunk_features):
         j1 = min(j0 + chunk_features, n_features)
-        block = np.asarray(X[:, j0:j1], dtype=np.float64)
+        block = np.array(X[:, j0:j1], dtype=np.float64, copy=True)
         block -= mean[j0:j1]
         # Physical modes are W^{-1/2} times the right singular vectors of
         # the weighted snapshot matrix X W^{1/2}, which simplifies to

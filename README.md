@@ -7,9 +7,20 @@ The project combines an OpenFOAM LES case with a small Python analysis pipeline
 for POD coefficients, cluster-based transition models, CNM network cycles, and
 an independent DMD comparison.
 
-The repository contains source code and configuration only. Simulation fields,
-VTK files, POD matrices, plots, and other generated results are deliberately
-excluded from Git.
+The repository contains the source code, case configuration, a synthetic
+quickstart, and selected reference figures and result summaries. Large
+simulation fields, VTK files, POD matrices, and working result directories
+are deliberately excluded from Git.
+
+The reference analysis finds a supported CNM cycle at $St\approx0.204$ and an
+independently ranked DMD mode at $St\approx0.205$. These are in-sample
+diagnostics; predictive performance on unseen data has not been established.
+
+![CNM and DMD frequency comparison for the reference LES](docs/results/16_cnm_dmd_frequency_comparison.png)
+
+See the [reference results and provenance](docs/results/README.md),
+[synthetic quickstart](examples/README.md), and
+[full project overview](docs/PROJECT_OVERVIEW.md).
 
 The workflow is:
 
@@ -63,7 +74,11 @@ data analysis and its mathematics.
 |   |   `-- transitions.py
 |   `-- requirements.txt
 |-- tests/
-|-- scripts/sweep_cnm_windows.sh
+|-- examples/README.md
+|-- docs/results/
+|-- scripts/
+|   |-- generate_demo.py
+|   `-- sweep_cnm_windows.sh
 `-- postprocessing.sh
 ```
 
@@ -72,11 +87,13 @@ The files below are generated locally and are not part of the repository:
 - OpenFOAM time directories, `processor*`, `postProcessing/`, and `VTK/`
 - Gmsh meshes and OpenFOAM `polyMesh`
 - `data/processed/`, `data/figures/`, and `data/results/`
-- NumPy arrays, plots, videos, logs, virtual environments, and ZIP archives
+- NumPy arrays, working plots, videos, logs, virtual environments, and ZIP archives
+
+Selected reference PNGs and JSON summaries are kept under `docs/results/`.
 
 ## Installation
 
-Create the Python environment in the project root:
+Use Python 3.11 or newer and create the environment in the project root:
 
 ```bash
 python3 -m venv .venv
@@ -85,7 +102,41 @@ pip install -r python/requirements.txt
 ```
 
 The force-coefficient analysis needs NumPy, pandas, Matplotlib, SciPy, and
-scikit-learn. Reading OpenFOAM VTK fields additionally needs PyVista and VTK.
+scikit-learn 1.8 or newer. Reading OpenFOAM VTK fields additionally needs PyVista
+and VTK. OpenFOAM.org v13, Gmsh, and MPI are needed only for the CFD workflow;
+see [the OpenFOAM instructions](openfoam/README.md).
+
+## Quickstart without CFD data
+
+After installation, run this small synthetic example from the project root:
+
+```bash
+python scripts/generate_demo.py
+python python/scripts/run_cnm_analysis.py \
+    --input-type npz \
+    --input data/processed/demo_periodic.npz \
+    --out data/figures/demo \
+    --K 8 \
+    --n-runs 20
+python python/scripts/run_dmd_analysis.py \
+    --input data/processed/demo_periodic.npz \
+    --out data/figures/demo
+python python/scripts/plot_release_diagnostics.py --out data/figures/demo
+```
+
+The example creates 241 samples of a periodic trajectory with known frequencies
+`St=0.2` and `St=0.4` for `D=U_inf=1`. Its outputs stay under the ignored `data/`
+directory. It demonstrates the pipeline with synthetic signals; the
+[reference results](docs/results/README.md) use the actual LES data. More
+details are in [examples/README.md](examples/README.md).
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+GitHub Actions runs the Python tests and the synthetic analysis workflow.
 
 ## Inputs
 
@@ -112,6 +163,15 @@ Because these observables have different scales, every column is standardized:
 
 where $\mu_j$ and $s_j$ are the sample mean and standard deviation of feature
 $j$.
+
+CMM analysis requires uniformly spaced samples. The OpenFOAM case writes force
+coefficients at every adaptive solver step, so a complete force time series
+can have variable time spacing. Add `--resample-dt 0.01` to the CNM command to
+linearly interpolate such data onto a uniform grid before applying `--stride`.
+The runner rejects nonuniform sampling without this option. Resampling changes
+the observed trajectory and transition statistics; choose its spacing with
+respect to the original data resolution. The reference field-POD trajectory is
+already uniformly sampled at `dt=0.25`.
 
 ### Velocity or pressure fields
 
@@ -260,14 +320,15 @@ time is
 \frac{R_r+R_{r+1}}{2}.
 ```
 
-The matrix entry is the conditional average over all observed
-$k\rightarrow j$ transitions:
+Only transitions whose two adjacent residence runs are fully observed
+contribute to the time estimate. Let $m_{jk}$ count these complete pairs. The
+matrix entry is their conditional average:
 
 ```math
 T_{jk}
 =
-\frac{1}{\widehat n_{jk}}
-\sum_{r:\,k\rightarrow j}\tau_r.
+\frac{1}{m_{jk}}
+\sum_{r:\,k\rightarrow j,\;\mathrm{complete\ pair}}\tau_r.
 ```
 
 Unobserved transitions are stored as `NaN`.
@@ -390,6 +451,7 @@ python python/scripts/run_cnm_analysis.py \
     --input openfoam/cases/cylinderLES3D/postProcessing/forceCoeffs/0/forceCoeffs.dat \
     --out data/figures/cnm_force_K10_t140_270 \
     --K 10 \
+    --resample-dt 0.01 \
     --t-min 140 \
     --t-max 270
 ```
@@ -420,7 +482,7 @@ python python/scripts/run_cnm_analysis.py \
 For a sweep over time windows and cluster counts:
 
 ```bash
-K_LIST="6 8 10 12" STRIDE=10 ./scripts/sweep_cnm_windows.sh
+K_LIST="6 8 10 12" STRIDE=10 RESAMPLE_DT=0.01 ./scripts/sweep_cnm_windows.sh
 ```
 
 For an exact-DMD comparison using the field POD coefficients:
@@ -540,7 +602,8 @@ Each run writes a local result directory containing:
 | `network_cycles.json` | directed cycles found from the supported Q/T network |
 | `*.npy` | numeric intermediate results |
 
-These files are reproducible outputs and are ignored by Git.
+Working outputs under `data/` are ignored by Git. Selected reference figures
+and summaries are committed under [`docs/results/`](docs/results/README.md).
 
 ## Limitations and scope
 

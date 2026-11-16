@@ -117,14 +117,16 @@ The generated `.msh` files and `constant/polyMesh/` are ignored by Git.
 
 | Patch | Velocity | Pressure | Meaning |
 |---|---|---|---|
-| `inlet` | fixed $(1,0,10^{-6})$ | zero gradient | uniform inflow with a tiny spanwise perturbation |
+| `inlet` | fixed $(1,0,10^{-6})$ | zero gradient | uniform inflow with a tiny spanwise component |
 | `outlet` | zero gradient | fixed $0$ | pressure reference and convective outflow approximation |
 | `walls` | slip | zero gradient | lateral far-field boundaries |
 | `cylinder` | no slip | zero gradient | solid cylinder |
 | `front`, `back` | cyclic | cyclic | periodic spanwise direction |
 
-The spanwise perturbation is small enough not to alter the reference speed but
-helps break an exactly two-dimensional initial symmetry.
+The spanwise component is small enough not to alter the reference speed. It is
+uniform in space and does not itself break spanwise translation symmetry. The
+computed wake must be checked for spanwise variation when assessing the
+three-dimensional flow.
 
 ## Numerical method
 
@@ -212,8 +214,8 @@ latest time after completion.
 The Reynolds-number helper can inspect or modify the dimensional parameters:
 
 ```bash
-./calcRe.py
-./calcRe.py --target 3900
+python3 calcRe.py
+python3 calcRe.py --target 3900
 ```
 
 Options that modify `nu` or the inlet velocity should be used deliberately,
@@ -224,18 +226,25 @@ because they change committed case configuration files.
 From the project root:
 
 ```bash
-./postprocessing.sh --t-min 140 --t-max 270 --K 10 --tag final_t140_270
+./postprocessing.sh --t-min 140 --t-max 270 --K 10 --resample-dt 0.01 --tag final_t140_270
 ```
 
 This can reconstruct parallel results, export `U` and `p` to VTK, merge force
-coefficient files, and run the Python CNM analysis.
+coefficient files, and run the Python CNM analysis. Reconstruction is skipped
+automatically for serial cases without processor directories.
+
+Adaptive solver time steps also produce irregular force-coefficient times.
+Choose `--resample-dt 0.01` to linearly interpolate them onto a fixed grid before
+`--stride` is applied; the default stride of 10 then gives `dt = 0.1`. Omit this
+option only for already uniform force data. Use `./postprocessing.sh --help` for
+all options.
 
 Useful switches include:
 
 ```bash
-./postprocessing.sh --no-reconstruct --no-vtk --t-min 140 --t-max 270 --K 10
-./postprocessing.sh --vtk-latest
-./postprocessing.sh --vtk-time 140:270
+./postprocessing.sh --no-reconstruct --no-vtk --t-min 140 --t-max 270 --K 10 --resample-dt 0.01
+./postprocessing.sh --vtk-latest --resample-dt 0.01
+./postprocessing.sh --vtk-time 140:270 --resample-dt 0.01
 ```
 
 ### Lambda2 vortex structures
@@ -311,6 +320,18 @@ cd openfoam/cases/cylinderLES3D
 
 `Allview` reconstructs the latest parallel time when processor directories
 exist and then starts `paraFoam`.
+
+To inspect or stop solver processes belonging to this case:
+
+```bash
+./Allkill --dry-run
+./Allkill
+```
+
+`Allkill` uses the explicit `-case` argument or the process working directory
+and only selects OpenFOAM solvers and their MPI launchers owned by the current
+user. It sends SIGTERM, then SIGKILL to matching processes still running after
+one second. It requires Linux `/proc` and Python 3.
 
 ## Cleaning local results
 

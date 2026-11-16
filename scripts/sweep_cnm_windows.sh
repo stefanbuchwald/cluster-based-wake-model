@@ -10,8 +10,15 @@ set -euo pipefail
 #   ./scripts/sweep_cnm_windows.sh
 #
 # Optional:
-#   K_LIST="6 8 10 12" STRIDE=10 ./scripts/sweep_cnm_windows.sh
+#   K_LIST="6 8 10 12" STRIDE=10 RESAMPLE_DT=0.01 ./scripts/sweep_cnm_windows.sh
 # =============================================================================
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: K_LIST='6 8 10' STRIDE=10 RESAMPLE_DT=0.01 ./scripts/sweep_cnm_windows.sh"
+    echo "RESAMPLE_DT is optional: interpolate force times to this fixed interval before stride."
+    echo "Without RESAMPLE_DT, force data must already be uniformly sampled."
+    exit 0
+fi
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -22,6 +29,7 @@ FIG_DIR="$PROJECT_ROOT/data/figures/window_sweep_$(date '+%Y%m%d_%H%M%S')"
 
 K_LIST="${K_LIST:-6 8 10}"
 STRIDE="${STRIDE:-10}"
+RESAMPLE_DT="${RESAMPLE_DT:-}"
 
 mkdir -p "$PROCESSED_DIR" "$FIG_DIR"
 
@@ -43,10 +51,19 @@ echo "==> Python       : $PYTHON"
 echo "==> Figure dir   : $FIG_DIR"
 echo "==> K list       : $K_LIST"
 echo "==> Stride       : $STRIDE"
+echo "==> Resample dt  : ${RESAMPLE_DT:-disabled; input must be uniform}"
 echo ""
 
-"$PYTHON" - <<'PY'
+"$PYTHON" - "$RESAMPLE_DT" <<'PY'
+import math
 import sys
+if sys.argv[1]:
+    try:
+        dt = float(sys.argv[1])
+        if not math.isfinite(dt) or dt <= 0:
+            raise ValueError
+    except ValueError:
+        raise SystemExit("ERROR: RESAMPLE_DT must be a finite positive number")
 missing = []
 for mod in ["numpy", "pandas", "matplotlib", "sklearn", "scipy"]:
     try:
@@ -206,7 +223,7 @@ print(min(target, max_time))
 PY
 )"
 
-    COUNT="$("$PYTHON" - "$MERGED_FORCE" "$TMIN" "$TMAX_EFF" "$STRIDE" <<'PY'
+    COUNT="$("$PYTHON" - "$MERGED_FORCE" "$TMIN" "$TMAX_EFF" "$STRIDE" "$RESAMPLE_DT" <<'PY'
 import sys
 import pandas as pd
 
@@ -214,11 +231,17 @@ path = sys.argv[1]
 tmin = float(sys.argv[2])
 tmax = float(sys.argv[3])
 stride = int(sys.argv[4])
+resample_dt = float(sys.argv[5]) if sys.argv[5] else None
 
 df = pd.read_csv(path, comment="#", sep=r"\s+", header=None)
 t = df.iloc[:, 0]
 mask = (t >= tmin) & (t <= tmax)
-n = len(df.loc[mask].iloc[::stride])
+selected_time = t.loc[mask].to_numpy()
+n_samples = len(selected_time)
+if resample_dt is not None and n_samples >= 2:
+    import math
+    n_samples = int(math.floor((selected_time[-1] - selected_time[0]) / resample_dt + 1e-9)) + 1
+n = (n_samples + stride - 1) // stride
 print(n)
 PY
 )"
@@ -250,6 +273,10 @@ PY
 
         echo "    Running CNM: K=$K"
 
+        RESAMPLE_ARGS=()
+        if [[ -n "$RESAMPLE_DT" ]]; then
+            RESAMPLE_ARGS=(--resample-dt "$RESAMPLE_DT")
+        fi
         "$PYTHON" python/scripts/run_cnm_analysis.py \
             --input-type force \
             --input "$MERGED_FORCE" \
@@ -257,7 +284,8 @@ PY
             --K "$K" \
             --t-min "$TMIN" \
             --t-max "$TMAX_EFF" \
-            --stride "$STRIDE"
+            --stride "$STRIDE" \
+            "${RESAMPLE_ARGS[@]}"
     done
 
     echo ""

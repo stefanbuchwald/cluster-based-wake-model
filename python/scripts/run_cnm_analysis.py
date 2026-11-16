@@ -26,6 +26,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.spatial.distance import pdist, squareform
 from sklearn.cluster import KMeans
 from sklearn.manifold import MDS
 from sklearn.preprocessing import StandardScaler
@@ -158,6 +159,57 @@ def read_npz_matrix(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
         raise ValueError(f"time must have length {X.shape[0]}, got {time.shape}")
 
     return time, X, metadata
+
+
+def uniform_time_step(time: np.ndarray) -> float:
+    """Return the fixed sample interval required by the sampled CMM."""
+    time = np.asarray(time, dtype=float)
+    if time.ndim != 1 or time.size < 2 or not np.all(np.isfinite(time)):
+        raise ValueError("time must contain at least two finite samples")
+    differences = np.diff(time)
+    if np.any(differences <= 0):
+        raise ValueError("time must be strictly increasing")
+    dt = float(np.median(differences))
+    if not np.allclose(differences, dt, rtol=1e-6, atol=1e-12):
+        raise ValueError(
+            "CMM requires uniformly sampled data. Adaptive OpenFOAM time steps "
+            "can produce nonuniform force-coefficient times. Use --resample-dt DT "
+            "to interpolate onto a fixed time grid before --stride is applied."
+        )
+    return dt
+
+
+def prepare_time_series(
+    time: np.ndarray,
+    X: np.ndarray,
+    resample_dt: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate samples and optionally interpolate features onto a fixed grid."""
+    time = np.asarray(time, dtype=float)
+    X = np.asarray(X, dtype=float)
+    if time.ndim != 1 or time.size < 2 or not np.all(np.isfinite(time)):
+        raise ValueError("time must contain at least two finite samples")
+    if X.ndim != 2 or X.shape[0] != time.size or X.shape[1] < 1:
+        raise ValueError("X must have shape (len(time), n_features) with at least one feature")
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X contains non-finite values")
+    if np.any(np.diff(time) <= 0):
+        raise ValueError("time must be strictly increasing")
+
+    if resample_dt is not None:
+        if not np.isfinite(resample_dt) or resample_dt <= 0:
+            raise ValueError("--resample-dt must be a finite positive number")
+        n_samples = int(np.floor((time[-1] - time[0]) / resample_dt + 1e-9)) + 1
+        if n_samples < 2:
+            raise ValueError("--resample-dt must produce at least two samples in the selected window")
+        regular_time = time[0] + resample_dt * np.arange(n_samples, dtype=float)
+        X = np.column_stack([
+            np.interp(regular_time, time, X[:, j]) for j in range(X.shape[1])
+        ])
+        time = regular_time
+
+    uniform_time_step(time)
+    return time, X
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +505,8 @@ def probabilistic_cmm_prediction(
         raise ValueError("n_runs must be at least 1")
     if len(time) == 0:
         raise ValueError("time must not be empty")
+    if len(time) > 1:
+        uniform_time_step(time)
 
     K, n_features = centers.shape
     if P.shape != (K, K):
@@ -499,6 +553,9 @@ def probabilistic_cmm_prediction(
 
 def mds_embedding(A: np.ndarray, centers: np.ndarray, random_state: int) -> tuple[np.ndarray, np.ndarray]:
     combined = np.vstack([A, centers])
+    # Mirroring condensed distances guarantees exact symmetry even for repeated
+    # states, whose near-zero pairwise distances can otherwise trigger MDS checks.
+    distances = squareform(pdist(combined, metric="euclidean"))
 
     n_components = min(3, combined.shape[0] - 1, combined.shape[1])
     n_components = max(2, n_components)
@@ -507,12 +564,13 @@ def mds_embedding(A: np.ndarray, centers: np.ndarray, random_state: int) -> tupl
         n_components=n_components,
         random_state=random_state,
         metric_mds=True,
+        metric="precomputed",
         n_init=4,
         init="random",
         max_iter=300,
     )
 
-    emb = mds.fit_transform(combined)
+    emb = mds.fit_transform(distances)
 
     emb_A = emb[: len(A)]
     emb_C = emb[len(A):]
@@ -840,6 +898,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--t-min", type=float, default=None)
     parser.add_argument("--t-max", type=float, default=None)
+    parser.add_argument(
+        "--resample-dt",
+        type=float,
+        default=None,
+        help="Linearly resample onto this fixed time interval after time filtering and before --stride.",
+    )
 
     parser.add_argument(
         "--stride",
@@ -922,6 +986,7 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
 
     time, X, feature_names, standardize, input_metadata = load_input(args)
+    time, X = prepare_time_series(time, X, resample_dt=args.resample_dt)
 
     if args.stride < 1:
         raise ValueError("--stride must be >= 1")
@@ -1224,6 +1289,8 @@ def main() -> None:
         "time_min": float(time.min()),
         "time_max": float(time.max()),
         "stride": int(args.stride),
+        "resample_dt": args.resample_dt,
+        "sample_dt": uniform_time_step(time),
         "K": int(args.K),
         "input_schema_version": input_schema_version,
         "pod_input_handling": pod["input_handling"],

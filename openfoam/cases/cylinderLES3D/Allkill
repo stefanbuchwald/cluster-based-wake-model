@@ -2,19 +2,71 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-casePath="$(pwd)"
-echo "==> Suche laufende OpenFOAM-Prozesse für ${casePath}"
+exec python3 - "$@" <<'PY'
+import argparse
+import os
+from pathlib import Path
+import signal
+import time
 
-# Find PIDs whose command line contains the case path
-pids=$(ps -eo pid=,args= | grep -F "${casePath}" | grep -E "foamRun|pimpleFoam|pisoFoam|simpleFoam|rhoPimpleFoam|mpirun" | grep -v grep | awk '{print $1}' || true)
+parser = argparse.ArgumentParser(description="Stop this user's OpenFOAM processes for this case.")
+parser.add_argument("--dry-run", action="store_true", help="list matching processes without stopping them")
+args = parser.parse_args()
+case_path = Path.cwd().resolve()
+solvers = {"foamRun", "pimpleFoam", "pisoFoam", "simpleFoam", "rhoPimpleFoam"}
+launchers = {"mpirun", "mpiexec", "mpiexec.hydra"}
 
-if [ -z "${pids}" ]; then
-  echo "==> nichts gefunden"
-  exit 0
-fi
 
-echo "==> kill: ${pids}"
-kill ${pids} || true
-sleep 1
-kill -9 ${pids} 2>/dev/null || true
-echo "==> done"
+def matches_case(pid):
+    proc = Path("/proc") / str(pid)
+    try:
+        if proc.stat().st_uid != os.getuid():
+            return False
+        argv = [os.fsdecode(part) for part in (proc / "cmdline").read_bytes().split(b"\0") if part]
+        if not argv:
+            return False
+        program = Path(argv[0]).name
+        if program not in solvers:
+            if program not in launchers or not any(Path(arg).name in solvers for arg in argv[1:]):
+                return False
+        cwd = (proc / "cwd").resolve(strict=True)
+        explicit_case = None
+        for index, arg in enumerate(argv[1:], start=1):
+            if arg == "-case":
+                if index + 1 >= len(argv):
+                    return False
+                explicit_case = Path(argv[index + 1])
+                break
+            if arg.startswith("-case="):
+                explicit_case = Path(arg.split("=", 1)[1])
+                break
+        target = cwd if explicit_case is None else (cwd / explicit_case).resolve()
+        return target == case_path
+    except (OSError, RuntimeError):
+        # A process may exit or become inaccessible while /proc is inspected.
+        return False
+
+
+print(f"==> Suche laufende OpenFOAM-Prozesse für {case_path}", flush=True)
+pids = sorted(int(proc.name) for proc in Path("/proc").iterdir() if proc.name.isdigit() and matches_case(proc.name))
+if not pids:
+    print("==> nichts gefunden")
+    raise SystemExit(0)
+print(f"==> {'dry-run' if args.dry_run else 'kill'}: {' '.join(map(str, pids))}", flush=True)
+if args.dry_run:
+    raise SystemExit(0)
+for pid in pids:
+    try:
+        if matches_case(pid):
+            os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+time.sleep(1)
+for pid in pids:
+    try:
+        if matches_case(pid):
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+print("==> done")
+PY

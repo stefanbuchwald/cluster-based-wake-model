@@ -5,9 +5,9 @@ set -euo pipefail
 # postprocessing.sh – Post-processing for cfd_rom_regime_clustering_cylinder
 #
 # Usage examples:
-#   ./postprocessing.sh --K 8 --stride 10 --t-min 20 --tag t60
-#   ./postprocessing.sh --K 8 --stride 10 --t-min 20 --tag t60 --no-vtk
-#   ./postprocessing.sh --K 10 --stride 20 --t-min 30 --tag t140 --vtk-latest
+#   ./postprocessing.sh --K 8 --stride 10 --resample-dt 0.01 --t-min 20 --tag t60
+#   ./postprocessing.sh --K 8 --stride 10 --resample-dt 0.01 --t-min 20 --tag t60 --no-vtk
+#   ./postprocessing.sh --K 10 --stride 20 --resample-dt 0.01 --t-min 30 --tag t140 --vtk-latest
 #
 # Steps:
 #   1. choose correct project-root venv
@@ -26,6 +26,7 @@ PROCESSED_DIR="${PROJECT_ROOT}/data/processed"
 
 K=10
 STRIDE=10
+RESAMPLE_DT=""
 T_MIN=""
 T_MAX=""
 TAG=""
@@ -34,10 +35,33 @@ DO_VTK=1
 VTK_LATEST=0
 VTK_TIME=""
 
+usage() {
+  cat <<'HELP'
+Usage: ./postprocessing.sh [options]
+  --K N                  Number of clusters (default: 10)
+  --stride N             Keep every Nth sample (default: 10)
+  --resample-dt DT        Interpolate to fixed DT before stride; choose for adaptive force times
+  --t-min T / --t-max T   Select the analysis window
+  --tag NAME             Add a label to the output directory
+  --no-reconstruct       Skip parallel reconstruction
+  --no-vtk               Skip VTK export
+  --vtk-latest           Export the latest time only
+  --vtk-time RANGE       Select VTK times, for example 140:270
+  -h, --help             Show this help
+
+Force input must be uniformly sampled unless --resample-dt is given.
+Example: ./postprocessing.sh --t-min 140 --t-max 270 --K 10 --resample-dt 0.01
+HELP
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --K)             K="$2"; shift 2 ;;
     --stride)        STRIDE="$2"; shift 2 ;;
+    --resample-dt)
+      if [[ $# -lt 2 ]]; then echo "ERROR: --resample-dt requires a positive interval" >&2; exit 2; fi
+      RESAMPLE_DT="$2"; shift 2 ;;
+    -h|--help)       usage; exit 0 ;;
     --t-min)         T_MIN="$2"; shift 2 ;;
     --t-max)         T_MAX="$2"; shift 2 ;;
     --tag)           TAG="$2"; shift 2 ;;
@@ -77,8 +101,16 @@ echo "==> Python       : ${PYTHON}"
 echo "==> Output       : ${OUT}"
 echo ""
 
-"${PYTHON}" - <<'PY'
+"${PYTHON}" - "${RESAMPLE_DT}" <<'PY'
+import math
 import sys
+if sys.argv[1]:
+    try:
+        dt = float(sys.argv[1])
+        if not math.isfinite(dt) or dt <= 0:
+            raise ValueError
+    except ValueError:
+        raise SystemExit("ERROR: --resample-dt must be a finite positive number")
 missing = []
 for mod in ["numpy", "pandas", "matplotlib", "sklearn", "scipy"]:
     try:
@@ -119,12 +151,16 @@ fi
 # -----------------------------------------------------------------------------
 
 if [[ "${DO_RECONSTRUCT}" == "1" ]]; then
-  echo "==> reconstructPar"
-  (
-    cd "${OF_CASE}"
-    mkdir -p logs
-    reconstructPar 2>&1 | tee "${OUT}/log.reconstructPar"
-  )
+  processor_dirs=("${OF_CASE}"/processor[0-9]*)
+  if [[ -d "${processor_dirs[0]}" ]]; then
+    echo "==> reconstructPar"
+    (
+      cd "${OF_CASE}"
+      reconstructPar 2>&1 | tee "${OUT}/log.reconstructPar"
+    )
+  else
+    echo "==> Skipping reconstructPar (no processor directories; serial case)"
+  fi
 else
   echo "==> Skipping reconstructPar"
 fi
@@ -303,6 +339,9 @@ echo ""
 
 echo "==> run_cnm_analysis"
 echo "    K=${K}, t_min=${T_MIN}, stride=${STRIDE}"
+if [[ -z "${RESAMPLE_DT}" ]]; then
+  echo "    Input must be uniform; use --resample-dt 0.01 for adaptive force times."
+fi
 
 CNM_ARGS=(
   "${PYTHON_DIR}/scripts/run_cnm_analysis.py"
@@ -318,6 +357,9 @@ CNM_ARGS=(
 
 if [[ -n "${T_MAX}" ]]; then
   CNM_ARGS+=(--t-max "${T_MAX}")
+fi
+if [[ -n "${RESAMPLE_DT}" ]]; then
+  CNM_ARGS+=(--resample-dt "${RESAMPLE_DT}")
 fi
 
 "${PYTHON}" "${CNM_ARGS[@]}"

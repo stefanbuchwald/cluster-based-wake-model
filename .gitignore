@@ -28,13 +28,8 @@ htmlcov/
 /analysie.sh
 /package_project.sh
 /python/notebooks/
-/python/src/*
-!/python/src/rom/
-/python/src/rom/*
-!/python/src/rom/dmd.py
-!/python/src/rom/pod.py
-!/python/src/rom/transitions.py
-!/python/src/rom/provenance.py
+/python/src/cfdrom/
+/python/src/rom/io_vtk.py
 /python/scripts/run_pod_dmd.py
 /openfoam/scripts/
 /openfoam/cases/cylinderLES3D/enter_venv.sh
@@ -72,6 +67,9 @@ PROJECT_TREE_PACKAGE.txt
 *.avi
 *.mp4
 *.pvsm
+
+# Selected reference figures used by the documentation
+!/docs/results/*.png
 
 # Logs and temporary output
 log

@@ -1,7 +1,6 @@
 # Cluster-Based Wake Model: Project Overview
 
-This document summarizes the full project for internal orientation before the
-repository is uploaded to GitHub. It explains what the OpenFOAM case computes,
+This document summarizes the full project. It explains what the OpenFOAM case computes,
 what the reduced-order model does, which outputs are important, and which files
 are intentionally not part of version control.
 
@@ -25,11 +24,12 @@ then compressed into a low-dimensional, data-driven reduced-order description:
 7. identify characteristic network cycles,
 8. compare their frequencies with DMD modes,
 9. use deterministic CNM mainly as a limitation diagnostic, and
-10. use probabilistic CMM/CNM as a more appropriate branching description.
+10. use probabilistic CMM as a more appropriate branching description.
 
-The repository is meant to contain source code, case setup, and documentation.
-Large generated CFD fields, VTK files, NumPy arrays, plots, meshes, and virtual
-environments are deliberately ignored by Git.
+The repository contains source code, case setup, documentation, a synthetic
+quickstart, and selected reference figures and JSON summaries under
+[`results/`](results/README.md). Large generated CFD fields, VTK files, NumPy
+arrays, working plots, meshes, and virtual environments are ignored by Git.
 
 ## 2. OpenFOAM Case
 
@@ -116,8 +116,8 @@ and reconstructs the latest time after completion.
 To inspect or update Reynolds-number-related parameters:
 
 ```bash
-./calcRe.py
-./calcRe.py --target 3900
+python3 calcRe.py
+python3 calcRe.py --target 3900
 ```
 
 Use parameter-changing options deliberately, because they modify committed case
@@ -275,10 +275,11 @@ For an observed direct transition `k -> j`,
 \tau_r = \frac{R_r + R_{r+1}}{2},
 ```
 
-and
+For the time estimate, only transitions whose two adjacent runs are fully
+observed are retained. Let $m_{jk}$ count these complete pairs. Then
 
 ```math
-T_{jk} = \frac{1}{\widehat n_{jk}}\sum_{r:k\to j}\tau_r.
+T_{jk} = \frac{1}{m_{jk}}\sum_{r:k\to j,\;\mathrm{complete\ pair}}\tau_r.
 ```
 
 Unobserved transitions are stored as `NaN`.
@@ -309,8 +310,8 @@ For the final `t = 140 ... 270` run:
 
 | Metric | Value |
 |---|---:|
-| deterministic occupation L1 error | `0.061420` |
-| probabilistic occupation L1 error | `0.028695` |
+| deterministic occupation L1 error | `0.065259` |
+| probabilistic occupation L1 error | `0.010768` |
 | number of probabilistic runs | `200` |
 
 The probabilistic occupation is closer to the data, while the deterministic
@@ -470,6 +471,7 @@ Before committing, check:
 ```bash
 git status --short
 git ls-files --others --exclude-standard
+python -m pytest -q
 ```
 
 The following source files should be committed if they are part of the final
@@ -503,9 +505,14 @@ openfoam/cases/cylinderLES3D/VTK/
 *.msh
 ```
 
-No generated CFD fields or result arrays are required for GitHub. The project
-should be understandable and reproducible from source, with the local generated
-artifacts used only for producing figures and checking results.
+No generated CFD fields or large result arrays are required for GitHub. Selected
+reference PNGs and JSON summaries are intentionally committed under
+`docs/results/`, including their original generation provenance. The global PNG
+ignore rule has an exception for that directory.
+
+The [synthetic quickstart](../examples/README.md) runs without CFD input files.
+Recomputing the reference LES results still requires generating the simulation
+data locally with the documented OpenFOAM workflow.
 
 ## 13. References
 
