@@ -452,9 +452,14 @@ python python/scripts/run_cnm_analysis.py \
     --out data/figures/cnm_force_K10_t140_270 \
     --K 10 \
     --resample-dt 0.01 \
+    --stride 10 \
     --t-min 140 \
     --t-max 270
 ```
+
+The force example uses an effective sample spacing of `0.1` after resampling
+and stride, keeping the pairwise MDS visualization manageable. This sampling
+choice affects the fitted transitions.
 
 From field POD coefficients, first export or keep VTK snapshots only for the
 analysis window `t=140...270`; otherwise the glob will include the full local

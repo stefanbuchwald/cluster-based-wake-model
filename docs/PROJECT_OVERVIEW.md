@@ -210,10 +210,13 @@ Let the centered snapshot matrix be
 The VTK-field pipeline uses the method of snapshots: the covariance matrix
 
 ```math
-\mathbf C = \frac{1}{N-1}\mathbf X_c \mathbf X_c^T
+\mathbf C = \frac{1}{N-1}\mathbf X_c \mathbf W \mathbf X_c^T
 ```
 
-is diagonalized first. The temporal POD coefficients are
+is diagonalized first. For the default volume-weighted POD, $\mathbf W$ is a
+diagonal matrix containing each sampled cell volume once per field component,
+in the flattened feature order. With uniform weighting, $\mathbf W=\mathbf I$.
+The temporal POD coefficients are
 
 ```math
 \boldsymbol a_i(t) = \sigma_i \boldsymbol v_i(t),
